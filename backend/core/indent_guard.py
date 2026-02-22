@@ -44,7 +44,8 @@ class IndentGuard:
         if not env_balanced:
             health_score -= 40
             issues.append(
-                f"Environment mismatch: {begins} begins vs {ends} ends")
+                f"Environment mismatch: {begins} begins vs {ends} ends"
+            )
 
         return {
             "is_healthy": health_score > 70,
