@@ -32,6 +32,7 @@ def call_azure_openai(prompt: str) -> str:
     """Helper for Azure OpenAI calls."""
     if not client:
         return "Azure OpenAI not configured."
+    # Rule 8: Use specific response API
     response = client.responses.create(
         input=prompt,
     )

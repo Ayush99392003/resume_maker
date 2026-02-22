@@ -21,10 +21,12 @@ class RefinementManager:
     def __init__(self):
         self.active_sessions: Dict[str, RefinementProposal] = {}
 
-    def create_session(self,
-                       session_id: str,
-                       original_latex: str,
-                       variants: List[DraftVariant]) -> RefinementProposal:
+    def create_session(
+        self,
+        session_id: str,
+        original_latex: str,
+        variants: List[DraftVariant]
+    ) -> RefinementProposal:
         proposal = RefinementProposal(
             original_latex=original_latex,
             variants=variants,
@@ -33,9 +35,11 @@ class RefinementManager:
         self.active_sessions[session_id] = proposal
         return proposal
 
-    def get_variant(self,
-                    session_id: str,
-                    variant_id: str) -> Optional[DraftVariant]:
+    def get_variant(
+        self,
+        session_id: str,
+        variant_id: str
+    ) -> Optional[DraftVariant]:
         session = self.active_sessions.get(session_id)
         if not session:
             return None
