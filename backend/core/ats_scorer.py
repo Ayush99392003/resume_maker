@@ -1,11 +1,13 @@
+import json
+from typing import Dict, List
 import numpy as np
 import google.generativeai as genai
-from typing import Dict, List
-import os
-import json
-import re
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+# Side effect: genai is already configured in core.config
+try:
+    import core.config  # noqa: F401
+except ImportError:
+    from . import config  # noqa: F401
 
 
 class ATSScorer:
@@ -44,7 +46,7 @@ class ATSScorer:
         )
         try:
             return json.loads(response.text)
-        except:
+        except (json.JSONDecodeError, Exception):
             return []
 
     def calculate_score(self,

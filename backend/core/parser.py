@@ -97,8 +97,8 @@ class SectionalParser:
             if r"\end{document}" in updated_latex:
                 new_sec = f"\\section{{{section_title}}}\n{new_content}\n"
                 return updated_latex.replace(
-                    "\\end{docu" + "ment}",
-                    f"{new_sec}\n\\end{{docu" + "ment}}"
+                    "\\end{document}",
+                    f"{new_sec}\n\\end{{document}}"
                 )
 
         return updated_latex
