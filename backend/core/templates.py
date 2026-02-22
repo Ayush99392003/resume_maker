@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 from typing import Dict, List
 
@@ -15,12 +14,12 @@ class TemplateManager:
     def _load_templates(self):
         """Loads all .tex files from the templates directory."""
         if not self.base_dir.exists():
-            os.makedirs(self.base_dir, exist_ok=True)
+            self.base_dir.mkdir(parents=True, exist_ok=True)
             return
 
-        for file in self.base_dir.glob("*.tex"):
-            with open(file, "r", encoding="utf-8") as f:
-                self.templates[file.stem] = f.read()
+        for tex_file in self.base_dir.glob("*.tex"):
+            with open(tex_file, "r", encoding="utf-8") as f:
+                self.templates[tex_file.stem] = f.read()
 
     def list_templates(self) -> List[str]:
         """Returns a list of available template names."""

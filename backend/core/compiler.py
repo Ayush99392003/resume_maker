@@ -31,8 +31,12 @@ class TectonicCompiler:
 
             try:
                 subprocess.run(
-                    [self.tectonic_path, "--noninteractive",
-                     "--chatter", "minimal", str(tex_file)],
+                    [
+                        self.tectonic_path,
+                        "--noninteractive",
+                        "--chatter", "minimal",
+                        str(tex_file)
+                    ],
                     cwd=tmpdir,
                     capture_output=True,
                     text=True,

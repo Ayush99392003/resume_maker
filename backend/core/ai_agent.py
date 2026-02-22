@@ -2,12 +2,13 @@ import json
 from typing import List, Optional
 from pydantic import BaseModel, Field
 import google.generativeai as genai
-try:
-    from core.config import GEMINI_API_KEY
-except ImportError:
-    from .config import GEMINI_API_KEY
 
-# Gemini Client is already configured in core.config
+# Side effect of importing config: genai.configure() is called
+# Side effect: importing config leads to genai.configure() being called.
+try:
+    import core.config  # noqa: F401
+except ImportError:
+    from . import config  # noqa: F401
 
 
 class ResumeUpdate(BaseModel):

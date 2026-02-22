@@ -1,8 +1,8 @@
+import base64
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
-import base64
 
 try:
     from core.compiler import compiler, CompilationError
@@ -99,7 +99,9 @@ async def compile_latex_direct(req: CompileRequest):
     """Directly compiles LaTeX without AI interaction."""
     try:
         pdf_bytes = compiler.compile(req.latex_code)
-        return {"pdf_base64": base64.b64encode(pdf_bytes).decode("utf-8")}
+        return {
+            "pdf_base64": base64.b64encode(pdf_bytes).decode("utf-8")
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -157,7 +159,8 @@ async def apply_edit(req: ApplyRequest):
     """Applies a selected variant to the document."""
     try:
         variant = refinement_manager.get_variant(
-            req.session_id, req.variant_id)
+            req.session_id, req.variant_id
+        )
         if not variant:
             raise HTTPException(status_code=404, detail="Variant not found")
 
@@ -226,5 +229,4 @@ async def squeeze_resume(req: dict):
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=8000)
