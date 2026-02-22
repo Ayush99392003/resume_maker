@@ -1,0 +1,53 @@
+# --- Multi-stage build for Tectonic ---
+FROM python:3.10-slim AS builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    libfontconfig1 \
+    fontconfig \
+    pkg-config \
+    libssl-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Tectonic via the official script
+# We download it first to ensure we aren't executing an error page
+RUN curl --proto '=https' --tlsv1.2 -sSfL https://drop-sh.fullyjustified.net > install.sh \
+    && chmod +x install.sh \
+    && ./install.sh \
+    && mv tectonic /usr/local/bin/
+
+# --- Final Production Image ---
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Copy Tectonic binary
+COPY --from=builder /usr/local/bin/tectonic /usr/local/bin/tectonic
+
+# Install runtime dependencies for Tectonic (Debian Bookworm)
+RUN apt-get update && apt-get install -y \
+    libfontconfig1 \
+    fontconfig \
+    libicu-dev \
+    libssl3 \
+    libgraphite2-3 \
+    libharfbuzz0b \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+
+# Install Python requirements
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy source
+COPY backend/ ./
+
+EXPOSE 8000
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
