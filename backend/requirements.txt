@@ -1,0 +1,11 @@
+fastapi==0.104.1
+uvicorn==0.24.0.post1
+pydantic==2.5.2
+openai>=1.12.0
+google-generativeai>=0.3.0
+python-dotenv==1.0.0
+numpy==1.26.2
+requests==2.31.0
+aiofiles==23.2.1
+httpx>=0.25.0
+# Tectonic is installed via Dockerfile system packages

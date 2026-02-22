@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+backend/__pycache__/
+backend/*.pyc
+backend/.venv/
+backend/venv/
+
+# Environment variables
+.env
+.env.local
+
+# Build outputs
+dist/
+build/
+*.pdf
+*.log
+*.aux
+*.out
+
+# IDEs
+.vscode/
+.idea/
+
+# Docker
+.dockerignore
+# (Wait, .dockerignore itself is usually tracked, but maybe some temp docker files aren't)
