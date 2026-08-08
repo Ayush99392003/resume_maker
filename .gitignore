@@ -1,13 +1,21 @@
 # Dependencies
 node_modules/
-backend/__pycache__/
-backend/*.pyc
+**/__pycache__/
+*.pyc
 backend/.venv/
 backend/venv/
+.venv/
+venv/
 
 # Environment variables
 .env
 .env.local
+
+# Durable chat sessions
+backend/data/
+
+# Local Tectonic binary (downloadable)
+backend/bin/
 
 # Build outputs
 dist/

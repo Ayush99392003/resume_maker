@@ -10,27 +10,36 @@
 % adjust the page margins
 \usepackage[scale=0.75]{geometry}
 
-% personal data
+% ZONE:HEADER:START
 \name{[[NAME]]}{}
 \title{[[TITLE]]}
 \address{[[ADDRESS]]}{}
 \phone[mobile]{[[PHONE]]}
 \email{[[EMAIL]]}
 \homepage{[[WEBSITE]]}
+% ZONE:HEADER:END
 
 \begin{document}
 \makecvtitle
 
 \section{Summary}
+% ZONE:SUMMARY:START
 [[SUMMARY]]
+% ZONE:SUMMARY:END
 
 \section{Experience}
+% ZONE:EXPERIENCE:START
 [[EXPERIENCE]]
+% ZONE:EXPERIENCE:END
 
 \section{Education}
+% ZONE:EDUCATION:START
 [[EDUCATION]]
+% ZONE:EDUCATION:END
 
 \section{Skills}
+% ZONE:SKILLS:START
 [[SKILLS]]
+% ZONE:SKILLS:END
 
 \end{document}

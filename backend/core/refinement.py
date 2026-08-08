@@ -7,6 +7,7 @@ class DraftVariant(BaseModel):
     latex_code: str
     summary: str
     intent: str  # e.g., "Professional", "Creative", "Concise"
+    zone_id: Optional[str] = None
 
 
 class RefinementProposal(BaseModel):
