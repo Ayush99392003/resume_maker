@@ -1,166 +1,370 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import AceEditor from 'react-ace';
-import { motion, AnimatePresence } from 'framer-motion';
-import { 
-  Sparkles, FileText, Send, Download, Settings, 
-  ChevronRight, Layout, Code2, Eye, MessageSquare, 
-  RefreshCw, CheckCircle2, AlertCircle, Target, 
-  BarChart3, Hash, ShieldAlert, Zap, Layers
+import {
+  Send, Download, Code2, Eye, RefreshCw, Plus, Trash2,
+  LogOut, User, X, FileText, Target, Layers
 } from 'lucide-react';
 
 import 'ace-builds/src-noconflict/mode-latex';
-import 'ace-builds/src-noconflict/theme-github_dark';
+import 'ace-builds/src-noconflict/theme-github';
 import 'ace-builds/src-noconflict/ext-language_tools';
 
 const API_BASE = '/api';
 
-function App() {
-  const [isStarted, setIsStarted] = useState(true);
+const PROVIDER_MODELS = {
+  groq: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'],
+  openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1'],
+  gemini: ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash'],
+  anthropic: ['claude-3-5-sonnet-latest', 'claude-3-5-haiku-latest'],
+  azure: ['gpt-4o'],
+  aws: ['anthropic.claude-3-5-sonnet-20240620-v1:0'],
+};
+
+function setAuthHeader(token) {
+  if (token) axios.defaults.headers.common.Authorization = `Bearer ${token}`;
+  else delete axios.defaults.headers.common.Authorization;
+}
+
+function errDetail(e, fallback) {
+  const d = e?.response?.data?.detail;
+  if (typeof d === 'string') return d;
+  if (d) return JSON.stringify(d);
+  return e?.message || fallback;
+}
+
+export default function App() {
+  const [authToken, setAuthToken] = useState(() => localStorage.getItem('rm_auth_token') || '');
+  const [profile, setProfile] = useState(null);
+  const [authMode, setAuthMode] = useState('login');
+  const [authUser, setAuthUser] = useState('');
+  const [authPass, setAuthPass] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [bootstrapping, setBootstrapping] = useState(true);
+  const [showProfile, setShowProfile] = useState(false);
+  const [keyDrafts, setKeyDrafts] = useState({});
+  const [keySaved, setKeySaved] = useState(false);
+  const [pwdCurrent, setPwdCurrent] = useState('');
+  const [pwdNew, setPwdNew] = useState('');
+  const [pwdMsg, setPwdMsg] = useState('');
+  const [profileTab, setProfileTab] = useState('keys'); // keys | password
+  const [saveError, setSaveError] = useState('');
+  const [savingKeys, setSavingKeys] = useState(false);
+
   const [loading, setLoading] = useState(false);
-  const [bio, setBio] = useState('');
   const [latexCode, setLatexCode] = useState('');
   const [pdfUrl, setPdfUrl] = useState('');
-  const [summary, setSummary] = useState('');
   const [activeTab, setActiveTab] = useState('preview');
-  const [messages, setMessages] = useState([
-    { 
-      role: 'assistant', 
-      content: "👋 Welcome! I'm your Gemini-powered Resume Architect. Paste your bio or career summary to begin building your professional LaTeX resume.",
-      status: 'success'
-    }
-  ]);
+  const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState('');
-  
   const [jd, setJd] = useState('');
   const [atsScore, setAtsScore] = useState(null);
   const [scoringLoading, setScoringLoading] = useState(false);
-  
-  const [health, setHealth] = useState({ is_healthy: true, score: 100, issues: [] });
-  const [selectedTemplate, setSelectedTemplate] = useState('classic');
-  const [isInitialized, setIsInitialized] = useState(false);
+  const [showAts, setShowAts] = useState(false);
+  const [selectedTemplate, setSelectedTemplate] = useState('modern');
+  const [zones, setZones] = useState([]);
+  const [sessionId, setSessionId] = useState(() => localStorage.getItem('rm_session_id') || '');
+  const [sessions, setSessions] = useState([]);
+  const [provider, setProvider] = useState('groq');
+  const [model, setModel] = useState('llama-3.3-70b-versatile');
+  const [providerInfo, setProviderInfo] = useState(null);
+  const chatEndRef = useRef(null);
+  const pdfUrlRef = useRef('');
 
-  const [sections, setSections] = useState([]);
-  const [selectedSection, setSelectedSection] = useState('Full Document');
+  const hasKey = (p = provider) =>
+    Boolean(profile?.keys_configured?.[p]);
+
+  const llmPayload = () => ({ provider, model });
+
+  const saveProfileKeys = async () => {
+    setSaveError('');
+    const toSave = Object.fromEntries(
+      Object.entries(keyDrafts).filter(([, v]) => (v || '').trim())
+    );
+    if (Object.keys(toSave).length === 0) {
+      setSaveError('Paste at least one new API key, then click Save.');
+      return;
+    }
+    setSavingKeys(true);
+    try {
+      const resp = await axios.put(`${API_BASE}/auth/profile/keys`, {
+        api_keys: toSave,
+        default_provider: provider,
+        default_model: model,
+      });
+      applyProfile(resp.data);
+      setKeyDrafts({});
+      setKeySaved(true);
+      setTimeout(() => setKeySaved(false), 1800);
+    } catch (e) {
+      setSaveError(errDetail(e, 'Could not save keys'));
+    } finally {
+      setSavingKeys(false);
+    }
+  };
+
+  const clearProviderKey = async (p) => {
+    try {
+      const resp = await axios.put(`${API_BASE}/auth/profile/keys`, {
+        api_keys: {},
+        clear_keys: [p],
+      });
+      applyProfile(resp.data);
+    } catch (e) {
+      setSaveError(errDetail(e, 'Could not clear key'));
+    }
+  };
+
+  const changePassword = async () => {
+    setPwdMsg('');
+    try {
+      await axios.post(`${API_BASE}/auth/profile/password`, {
+        current_password: pwdCurrent,
+        new_password: pwdNew,
+      });
+      setPwdCurrent('');
+      setPwdNew('');
+      setPwdMsg('Password updated.');
+    } catch (e) {
+      setPwdMsg(errDetail(e, 'Could not update password'));
+    }
+  };
+
+  const updatePdf = useCallback((base64) => {
+    if (!base64) return;
+    if (pdfUrlRef.current) URL.revokeObjectURL(pdfUrlRef.current);
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+    pdfUrlRef.current = url;
+    setPdfUrl(url);
+  }, []);
+
+  const applyProfile = (p) => {
+    setProfile(p);
+    if (p.default_provider) setProvider(p.default_provider);
+    if (p.default_model) setModel(p.default_model);
+    // Never put secret values into inputs — only track typed updates
+    setKeyDrafts({});
+  };
+
+  const loadSessions = async () => {
+    const resp = await axios.get(`${API_BASE}/sessions`);
+    setSessions(resp.data.sessions || []);
+  };
+
+  const hydrateSession = async (id) => {
+    const resp = await axios.get(`${API_BASE}/sessions/${id}`);
+    const s = resp.data;
+    setSessionId(s.session_id);
+    localStorage.setItem('rm_session_id', s.session_id);
+    setMessages(s.messages || []);
+    setLatexCode(s.latex_code || '');
+    setSelectedTemplate(s.template_name || 'classic');
+    setProvider(s.active_provider || provider);
+    setModel(s.active_model || model);
+    if (s.latex_code) {
+      try {
+        const c = await axios.post(`${API_BASE}/compile`, { latex_code: s.latex_code });
+        updatePdf(c.data.pdf_base64);
+      } catch (_) { /* tectonic may be missing */ }
+    }
+  };
+
+  const createSession = async () => {
+    const resp = await axios.post(`${API_BASE}/sessions`, {
+      template_name: selectedTemplate,
+      provider,
+      model,
+    });
+    const s = resp.data;
+    setSessionId(s.session_id);
+    localStorage.setItem('rm_session_id', s.session_id);
+    setMessages(s.messages || []);
+    setLatexCode(s.latex_code || '');
+    setPdfUrl('');
+    setAtsScore(null);
+    await loadSessions();
+    return s;
+  };
 
   useEffect(() => {
-    if (latexCode) {
-      const delayDebounceFn = setTimeout(() => {
-        validateCode();
-        fetchSections();
-      }, 1000);
-      return () => clearTimeout(delayDebounceFn);
-    }
+    (async () => {
+      try {
+        const p = await axios.get(`${API_BASE}/providers`);
+        setProviderInfo(p.data);
+      } catch (_) { /* backend down */ }
+
+      const token = localStorage.getItem('rm_auth_token');
+      if (!token) {
+        setBootstrapping(false);
+        return;
+      }
+      setAuthHeader(token);
+      try {
+        const me = await axios.get(`${API_BASE}/auth/me`);
+        setAuthToken(token);
+        applyProfile(me.data);
+        await loadSessions();
+        const sid = localStorage.getItem('rm_session_id');
+        if (sid) {
+          try { await hydrateSession(sid); } catch (_) {
+            localStorage.removeItem('rm_session_id');
+            setSessionId('');
+          }
+        }
+      } catch (_) {
+        localStorage.removeItem('rm_auth_token');
+        setAuthToken('');
+        setAuthHeader(null);
+      } finally {
+        setBootstrapping(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, loading]);
+
+  useEffect(() => {
+    if (!latexCode) return;
+    const t = setTimeout(async () => {
+      try {
+        const s = await axios.post(`${API_BASE}/sections`, { latex_code: latexCode });
+        setZones(s.data.zones || []);
+      } catch (_) { /* ignore */ }
+    }, 600);
+    return () => clearTimeout(t);
   }, [latexCode]);
 
-  const validateCode = async () => {
-    try {
-      const resp = await axios.post(`${API_BASE}/validate`, { latex_code: latexCode });
-      setHealth(resp.data);
-    } catch (e) {}
-  };
+  useEffect(() => {
+    const models = PROVIDER_MODELS[provider] || [];
+    if (models.length && !models.includes(model)) setModel(models[0]);
+  }, [provider, model]);
 
-  const fetchSections = async () => {
+  const handleAuth = async () => {
+    setAuthError('');
+    setAuthLoading(true);
     try {
-      const resp = await axios.post(`${API_BASE}/sections`, { latex_code: latexCode });
-      setSections(['Full Document', ...resp.data.sections]);
-    } catch (e) {}
-  };
-
-  const handleScore = async () => {
-    if (!jd.trim()) return;
-    setScoringLoading(true);
-    try {
-      // We need to extract plain text from LaTeX for better scoring
-      // For now, we'll send the LaTeX but in a real app, a parser would clean it
-      const resp = await axios.post(`${API_BASE}/score`, {
-        resume_text: latexCode,
-        job_description: jd
+      const path = authMode === 'login' ? '/auth/login' : '/auth/register';
+      const resp = await axios.post(`${API_BASE}${path}`, {
+        username: authUser.trim(),
+        password: authPass,
       });
-      setAtsScore(resp.data);
+      localStorage.setItem('rm_auth_token', resp.data.token);
+      setAuthToken(resp.data.token);
+      setAuthHeader(resp.data.token);
+      applyProfile(resp.data.profile);
+      setAuthPass('');
+      await loadSessions();
+      if (!resp.data.profile?.keys_configured?.groq) setShowProfile(true);
     } catch (e) {
-      console.error("Scoring failed", e);
+      setAuthError(errDetail(e, 'Authentication failed'));
     } finally {
-      setScoringLoading(false);
+      setAuthLoading(false);
     }
   };
 
-  const handleInitOrEdit = async () => {
-    if (!inputValue.trim()) return;
-    const msg = { role: 'user', content: inputValue };
-    setMessages(prev => [...prev, msg]);
-    setInputValue('');
-    setLoading(true);
+  const logout = async () => {
+    try { await axios.post(`${API_BASE}/auth/logout`); } catch (_) { /* ignore */ }
+    localStorage.removeItem('rm_auth_token');
+    setAuthToken('');
+    setProfile(null);
+    setAuthHeader(null);
+    setShowProfile(false);
+  };
 
+  const patchModel = async (nextProvider, nextModel) => {
+    setProvider(nextProvider);
+    setModel(nextModel);
+    if (!sessionId) return;
     try {
-      if (!isInitialized) {
-        setBio(msg.content);
-        const resp = await axios.post(`${API_BASE}/generate`, { 
-          bio: msg.content, 
-          template_name: selectedTemplate 
-        });
-        setLatexCode(resp.data.latex_code);
-        setSummary(resp.data.summary);
-        updatePdf(resp.data.pdf_base64);
-        setIsInitialized(true);
-        setMessages(prev => [...prev, { 
-          role: 'assistant', 
-          content: `Initial resume engineered! You can now refine it via chat. I'll provide multiple variants for your edits.`, 
-          status: 'success' 
-        }]);
-      } else {
-        // Multi-turn Refinement Loop
-        const target = selectedSection === 'Full Document' ? null : selectedSection;
-        const resp = await axios.post(`${API_BASE}/propose`, {
-          current_latex: latexCode,
-          command: msg.content,
-          section_name: target
-        });
-        
-        setMessages(prev => [...prev, { 
-          role: 'assistant', 
-          type: 'proposal',
-          sessionId: resp.data.session_id,
-          variants: resp.data.variants,
-          targetSection: selectedSection,
-          content: `I've generated a few variations for your edit in ${selectedSection}. Which one do you prefer?`,
-          status: 'success' 
-        }]);
+      await axios.patch(`${API_BASE}/sessions/${sessionId}/model`, {
+        provider: nextProvider,
+        model: nextModel,
+      });
+    } catch (_) { /* ignore */ }
+  };
+
+  const pushAssistant = (content, extra = {}) => {
+    setMessages(prev => [...prev, { role: 'assistant', content, ...extra }]);
+  };
+
+  const handleChat = async () => {
+    if (!inputValue.trim()) return;
+    if (!hasKey()) {
+      pushAssistant(`Add your ${provider.toUpperCase()} API key in Profile, then save.`, { status: 'error' });
+      setShowProfile(true);
+      return;
+    }
+    let sid = sessionId;
+    if (!sid) {
+      const s = await createSession();
+      sid = s.session_id;
+    }
+    const text = inputValue;
+    setInputValue('');
+    setMessages(prev => [...prev, { role: 'user', content: text }]);
+    setLoading(true);
+    try {
+      const resp = await axios.post(`${API_BASE}/chat`, {
+        session_id: sid,
+        message: text,
+        template_name: selectedTemplate,
+        ...llmPayload(),
+      });
+      setLatexCode(resp.data.latex_code || '');
+      if (resp.data.pdf_base64) updatePdf(resp.data.pdf_base64);
+      setProvider(resp.data.provider || provider);
+      setModel(resp.data.model || model);
+      const msg = {
+        role: 'assistant',
+        content: resp.data.reply,
+        provider: resp.data.provider,
+        model: resp.data.model,
+        meta: { zones_changed: resp.data.zones_changed },
+      };
+      if (resp.data.proposals) {
+        msg.type = 'proposal';
+        msg.sessionId = resp.data.proposals.session_id;
+        msg.variants = resp.data.proposals.variants;
       }
+      setMessages(prev => [...prev, msg]);
+      await loadSessions();
     } catch (e) {
-      setMessages(prev => [...prev, { 
-        role: 'assistant', 
-        content: 'Action failed. Please try again.', 
-        status: 'error' 
-      }]);
+      console.error('chat error', e.response?.status, e.response?.data);
+      pushAssistant(errDetail(e, 'Chat failed'), { status: 'error' });
     } finally {
       setLoading(false);
     }
   };
 
-  const applyVariant = async (sessionId, variantId, targetSection) => {
+  const applyVariant = async (proposalSessionId, variantId) => {
+    if (!sessionId) return;
     setLoading(true);
     try {
-      const target = targetSection === 'Full Document' ? null : targetSection;
-      const resp = await axios.post(`${API_BASE}/apply`, {
+      const resp = await axios.post(`${API_BASE}/chat/apply`, {
         session_id: sessionId,
+        proposal_session_id: proposalSessionId,
         variant_id: variantId,
-        current_latex: latexCode,
-        section_name: target
+        ...llmPayload(),
       });
       setLatexCode(resp.data.latex_code);
-      updatePdf(resp.data.pdf_base64);
-      setMessages(prev => [...prev, { 
-        role: 'assistant', 
-        content: `Applied! ${resp.data.summary}`, 
-        status: 'success' 
-      }]);
+      if (resp.data.pdf_base64) updatePdf(resp.data.pdf_base64);
+      if (resp.data.compile_error) {
+        pushAssistant(
+          `Applied: ${resp.data.summary}\n\n(Compile issue: ${resp.data.compile_error})`,
+          { status: 'error' },
+        );
+      } else {
+        pushAssistant(`Applied: ${resp.data.summary}`);
+      }
     } catch (e) {
-       setMessages(prev => [...prev, { 
-        role: 'assistant', 
-        content: 'Failed to apply variant.', 
-        status: 'error' 
-      }]);
+      pushAssistant(errDetail(e, 'Failed to apply variant'), { status: 'error' });
     } finally {
       setLoading(false);
     }
@@ -169,294 +373,575 @@ function App() {
   const handleSync = async () => {
     setLoading(true);
     try {
-      const resp = await axios.post(`${API_BASE}/compile`, {
-        latex_code: latexCode
-      });
+      const resp = await axios.post(`${API_BASE}/compile`, { latex_code: latexCode });
       updatePdf(resp.data.pdf_base64);
+      if (sessionId) {
+        await axios.put(`${API_BASE}/sessions/${sessionId}/latex`, { latex_code: latexCode });
+      }
     } catch (e) {
-      setMessages(prev => [...prev, { 
-        role: 'assistant', 
-        content: 'Manual compile failed. Check your LaTeX syntax.', 
-        status: 'error' 
-      }]);
+      pushAssistant(errDetail(e, 'Compile failed'), { status: 'error' });
     } finally {
       setLoading(false);
     }
   };
-
-  const [snapshots, setSnapshots] = useState([]);
 
   const handleSqueeze = async () => {
+    if (!latexCode) return;
     setLoading(true);
     try {
-      const resp = await axios.post(`${API_BASE}/squeeze`, { latex_code: latexCode });
+      const resp = await axios.post(`${API_BASE}/squeeze`, { latex_code: latexCode, ...llmPayload() });
       setLatexCode(resp.data.latex_code);
       updatePdf(resp.data.pdf_base64);
-      setMessages(prev => [...prev, { 
-        role: 'assistant', 
-        content: `Layout optimized! ${resp.data.summary}`, 
-        status: 'success' 
-      }]);
+      pushAssistant(resp.data.summary || 'Layout optimized.');
     } catch (e) {
-      setMessages(prev => [...prev, { 
-        role: 'assistant', 
-        content: 'Optimization failed.', 
-        status: 'error' 
-      }]);
+      pushAssistant(errDetail(e, 'Optimization failed'), { status: 'error' });
     } finally {
       setLoading(false);
     }
   };
 
-  const handleSnapshot = () => {
-    const newSnapshot = {
-      id: Date.now(),
-      timestamp: new Date().toLocaleTimeString(),
-      latex: latexCode,
-      pdf: pdfUrl
-    };
-    setSnapshots(prev => [newSnapshot, ...prev].slice(0, 5));
-    setMessages(prev => [...prev, { 
-      role: 'assistant', 
-      content: 'Snapshot saved! You can restore this version from the sidebar.', 
-      status: 'success' 
-    }]);
+  const handleScore = async () => {
+    if (!jd.trim()) return;
+    setScoringLoading(true);
+    try {
+      const resp = await axios.post(`${API_BASE}/score`, {
+        resume_text: latexCode,
+        job_description: jd,
+        ...llmPayload(),
+      });
+      setAtsScore(resp.data);
+    } catch (e) {
+      pushAssistant(errDetail(e, 'ATS scoring failed'), { status: 'error' });
+    } finally {
+      setScoringLoading(false);
+    }
   };
 
-  return (
-    <div className="h-screen flex flex-col bg-[#fafafa] font-inter overflow-hidden">
-      <nav className="h-24 glass fixed top-0 left-0 right-0 z-50 px-12 flex items-center justify-between border-b border-black/5">
-        <div className="flex items-center gap-4 text-slate-950 font-black text-3xl tracking-tighter">
-          <div className="p-2 bg-slate-900 rounded-xl text-white shadow-xl shadow-slate-900/20"><Sparkles size={24} /></div>
-          <span>RM AI Artifacts</span>
-        </div>
-        <div className="flex items-center gap-8">
-          <div className="flex bg-slate-100 p-2 rounded-2xl border border-black/5">
-            <button onClick={() => setActiveTab('preview')} className={`flex items-center gap-3 px-8 py-2.5 rounded-xl transition-all font-black text-xs uppercase tracking-widest ${activeTab === 'preview' ? 'bg-white shadow-xl text-blue-600' : 'text-slate-500 hover:text-slate-800'}`}><Eye size={20} /> Preview</button>
-            <button onClick={() => setActiveTab('code')} className={`flex items-center gap-3 px-8 py-2.5 rounded-xl transition-all font-black text-xs uppercase tracking-widest ${activeTab === 'code' ? 'bg-white shadow-xl text-blue-600' : 'text-slate-500 hover:text-slate-800'}`}><Code2 size={20} /> Source</button>
+  const deleteSession = async (id, e) => {
+    e.stopPropagation();
+    await axios.delete(`${API_BASE}/sessions/${id}`);
+    if (id === sessionId) {
+      setSessionId('');
+      localStorage.removeItem('rm_session_id');
+      setMessages([]);
+      setLatexCode('');
+      setPdfUrl('');
+    }
+    await loadSessions();
+  };
+
+  const exportPdf = () => {
+    if (!pdfUrl) return;
+    const a = document.createElement('a');
+    a.href = pdfUrl;
+    a.download = 'resume.pdf';
+    a.click();
+  };
+
+  const modelOptions = PROVIDER_MODELS[provider] || [model];
+
+  if (bootstrapping) {
+    return (
+      <div className="h-full flex items-center justify-center text-ink-500 text-sm">
+        Loading…
+      </div>
+    );
+  }
+
+  if (!authToken || !profile) {
+    return (
+      <div className="min-h-full grid lg:grid-cols-2">
+        <section className="relative hidden lg:flex flex-col justify-between p-14 bg-ink-950 text-ink-50 overflow-hidden">
+          <div
+            className="absolute inset-0 opacity-40"
+            style={{
+              backgroundImage:
+                'radial-gradient(circle at 20% 20%, #2f6b52 0%, transparent 40%), radial-gradient(circle at 80% 80%, #3a3833 0%, transparent 35%)',
+            }}
+          />
+          <div className="relative">
+            <p className="text-xs tracking-[0.25em] uppercase text-ink-200/70 mb-6">Resume Maker</p>
+            <h1 className="font-display text-4xl leading-tight max-w-md">
+              Craft a precise LaTeX resume in conversation.
+            </h1>
           </div>
-          <button onClick={handleSnapshot} className="flex items-center gap-3 px-8 py-4 bg-white border border-black/10 hover:bg-slate-50 text-slate-950 rounded-2xl font-black text-xs uppercase tracking-widest transition-all shadow-sm"><FileText size={18} /> Snapshot</button>
-          <button className="flex items-center gap-3 px-10 py-4 bg-slate-950 hover:bg-blue-600 text-white rounded-2xl font-black text-sm transition-all shadow-2xl hover:-translate-y-1"><Download size={22} /> Export PDF</button>
-        </div>
-      </nav>
+          <p className="relative text-sm text-ink-200/80 max-w-sm leading-relaxed">
+            Dynamic zones keep structure stable. Chat to update content. Switch models anytime — your profile and keys stay put.
+          </p>
+        </section>
 
-      <main className="flex-1 mt-24 flex overflow-hidden">
-        <div className="w-[540px] border-r border-black/5 bg-white flex flex-col z-20 shadow-[20px_0_100px_rgba(0,0,0,0.02)]">
-          <div className="flex-1 overflow-auto p-12 space-y-14">
-            {/* Page Squeezer */}
-            <section className="space-y-6">
-               <div className="flex items-center justify-between">
-                 <h3 className="text-xs font-black uppercase tracking-[0.25em] text-slate-400 flex items-center gap-2"><Zap size={14} /> Power Tools</h3>
-               </div>
-               <button 
-                onClick={handleSqueeze}
-                disabled={loading}
-                className="w-full py-6 bg-gradient-to-br from-blue-600 to-indigo-700 text-white rounded-[2rem] font-black text-sm uppercase tracking-widest shadow-xl shadow-blue-500/20 flex items-center justify-center gap-3 hover:-translate-y-1 transition-all disabled:opacity-50"
-               >
-                 {loading ? <RefreshCw className="animate-spin" size={18} /> : <><Layers size={18} /> Auto-Fit Page Squeezer</>}
-               </button>
-            </section>
+        <section className="flex items-center justify-center p-8">
+          <div className="w-full max-w-sm space-y-8">
+            <div>
+              <h2 className="font-display text-2xl text-ink-900">
+                {authMode === 'login' ? 'Welcome back' : 'Create your profile'}
+              </h2>
+              <p className="mt-2 text-sm text-ink-500">
+                Sign in to save API keys and resume chat history.
+              </p>
+            </div>
 
-            {/* Templates Selector */}
-            <section className="space-y-6">
-               <div className="flex items-center justify-between">
-                 <h3 className="text-xs font-black uppercase tracking-[0.25em] text-slate-400 flex items-center gap-2"><Layout size={14} /> Design Template</h3>
-               </div>
-               <div className="flex gap-3">
-                 {['classic', 'modern', 'executive'].map(t => (
-                   <button key={t} onClick={() => setSelectedTemplate(t)} className={`flex-1 py-4 rounded-[1.25rem] border font-black text-[10px] uppercase tracking-widest transition-all ${selectedTemplate === t ? 'bg-slate-900 border-slate-900 text-white shadow-xl' : 'bg-slate-50 border-black/5 text-slate-500 hover:bg-slate-100'}`}>{t}</button>
-                 ))}
-               </div>
-            </section>
-
-            {snapshots.length > 0 && (
-              <section className="space-y-6">
-                 <h3 className="text-xs font-black uppercase tracking-[0.25em] text-slate-400 flex items-center gap-2"><BarChart3 size={14} /> History Snapshots</h3>
-                 <div className="space-y-3">
-                   {snapshots.map(s => (
-                     <button key={s.id} onClick={() => { setLatexCode(s.latex); setPdfUrl(s.pdf); }} className="w-full p-4 bg-slate-50 border border-black/5 rounded-2xl flex items-center justify-between hover:bg-blue-50 transition-all">
-                       <div className="flex items-center gap-3">
-                         <div className="w-2 h-2 rounded-full bg-blue-600" />
-                         <span className="text-xs font-bold text-slate-700">Snapshot {s.timestamp}</span>
-                       </div>
-                       <ChevronRight size={14} className="text-slate-300" />
-                     </button>
-                   ))}
-                 </div>
-              </section>
-            )}
-
-            {/* ATS Match Gauge */}
-            <section className="space-y-8">
-              <div className="flex items-center justify-between"><h3 className="text-xl font-black flex items-center gap-3"><Target className="text-blue-600" /> ATS Radar</h3></div>
-              <div className="p-10 bg-slate-50 rounded-[3rem] border border-black/5 space-y-8 relative overflow-hidden group">
-                <div className="absolute top-0 right-0 w-32 h-32 bg-blue-600/5 rounded-full -mr-16 -mt-16 transition-all group-hover:scale-110" />
-                {atsScore && (
-                  <div className="space-y-8">
-                    <div className="flex items-center gap-6">
-                      <div className="flex items-center justify-center w-24 h-24 rounded-full border-8 border-blue-600 font-black text-blue-600 text-xl shadow-2xl shadow-blue-500/10 bg-white">
-                        {Math.round(atsScore.total_score)}%
-                      </div>
-                      <div className="space-y-1">
-                        <p className="font-black text-slate-900 text-sm">Match Confidence</p>
-                        <p className="text-xs font-bold text-slate-400">Semantic: {Math.round(atsScore.semantic_match)}% | Keywords: {Math.round(atsScore.keyword_match)}%</p>
-                      </div>
-                    </div>
-                    
-                    <div className="space-y-4">
-                       <p className="text-[10px] font-black uppercase tracking-[0.25em] text-slate-400">Keyword Analytics</p>
-                       <div className="flex flex-wrap gap-2">
-                         {atsScore.matched_keywords.map(kw => (
-                           <span key={kw} className="px-3 py-1 bg-green-500/10 text-green-600 rounded-full text-[10px] font-black uppercase tracking-widest">+{kw}</span>
-                         ))}
-                         {atsScore.missing_keywords.map(kw => (
-                           <span key={kw} className="px-3 py-1 bg-red-500/10 text-red-600 rounded-full text-[10px] font-black uppercase tracking-widest">-{kw}</span>
-                         ))}
-                       </div>
-                    </div>
-                  </div>
-                )}
-                {!atsScore && (
-                  <div className="space-y-4">
-                    <p className="text-[10px] font-black uppercase tracking-[0.25em] text-slate-400">Target Job Description</p>
-                    <textarea value={jd} onChange={(e) => setJd(e.target.value)} placeholder="Paste JD for precision match..." className="w-full h-44 bg-white border border-black/10 rounded-[2rem] p-6 text-sm font-bold focus:ring-4 focus:ring-blue-600/10 outline-none transition-all resize-none shadow-sm" />
-                  </div>
-                )}
-                <button 
-                  onClick={handleScore} 
-                  disabled={scoringLoading}
-                  className="w-full py-5 bg-slate-950 text-white rounded-[1.5rem] font-black text-sm transition-all hover:bg-blue-600 shadow-xl shadow-slate-950/10 flex items-center justify-center gap-2 tracking-widest uppercase disabled:opacity-50"
+            <div className="flex border-b border-ink-200">
+              {['login', 'register'].map((m) => (
+                <button
+                  key={m}
+                  onClick={() => { setAuthMode(m); setAuthError(''); }}
+                  className={`flex-1 pb-3 text-xs font-semibold uppercase tracking-wider ${
+                    authMode === m ? 'text-accent border-b-2 border-accent' : 'text-ink-500'
+                  }`}
                 >
-                  {scoringLoading ? <RefreshCw className="animate-spin" size={14} /> : <>Optimize for JD <Zap size={14} /></>}
+                  {m === 'login' ? 'Log in' : 'Register'}
+                </button>
+              ))}
+            </div>
+
+            <div className="space-y-3">
+              <label className="block space-y-1.5">
+                <span className="text-xs font-medium text-ink-500">Username</span>
+                <input
+                  value={authUser}
+                  onChange={(e) => setAuthUser(e.target.value)}
+                  autoComplete="username"
+                  className="w-full px-3.5 py-2.5 rounded-md border border-ink-200 bg-white text-sm outline-none focus:border-accent"
+                />
+              </label>
+              <label className="block space-y-1.5">
+                <span className="text-xs font-medium text-ink-500">Password</span>
+                <input
+                  type="password"
+                  value={authPass}
+                  onChange={(e) => setAuthPass(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleAuth()}
+                  autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
+                  className="w-full px-3.5 py-2.5 rounded-md border border-ink-200 bg-white text-sm outline-none focus:border-accent"
+                />
+              </label>
+              {authError && (
+                <p className="text-sm text-red-700 bg-red-50 border border-red-100 rounded-md px-3 py-2">
+                  {authError}
+                </p>
+              )}
+              <button
+                onClick={handleAuth}
+                disabled={authLoading || !authUser.trim() || !authPass}
+                className="w-full mt-2 py-2.5 rounded-md bg-accent text-white text-sm font-semibold hover:bg-accent-mid disabled:opacity-40"
+              >
+                {authLoading ? 'Working…' : authMode === 'login' ? 'Continue' : 'Create profile'}
+              </button>
+            </div>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full flex flex-col bg-ink-50">
+      <header className="h-14 shrink-0 border-b border-ink-200 bg-white px-4 lg:px-6 flex items-center justify-between gap-4">
+        <div className="flex items-center gap-3 min-w-0">
+          <span className="font-display text-lg text-ink-900">Resume Maker</span>
+          <span className="hidden sm:inline text-ink-200">|</span>
+          <span className="hidden sm:inline text-xs text-ink-500 truncate">{profile.username}</span>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <select
+            value={provider}
+            onChange={(e) => patchModel(e.target.value, (PROVIDER_MODELS[e.target.value] || [model])[0])}
+            className="h-9 rounded-md border border-ink-200 bg-white px-2 text-xs font-medium"
+          >
+            {Object.keys(PROVIDER_MODELS).map((p) => (
+              <option key={p} value={p}>{p}{hasKey(p) ? '' : ' · needs key'}</option>
+            ))}
+          </select>
+          <select
+            value={model}
+            onChange={(e) => patchModel(provider, e.target.value)}
+            className="hidden md:block h-9 max-w-[200px] rounded-md border border-ink-200 bg-white px-2 text-xs"
+          >
+            {modelOptions.map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
+
+          <div className="flex rounded-md border border-ink-200 overflow-hidden">
+            <button
+              onClick={() => setActiveTab('preview')}
+              className={`h-9 px-3 text-xs font-medium flex items-center gap-1.5 ${activeTab === 'preview' ? 'bg-ink-900 text-white' : 'bg-white text-ink-700'}`}
+            >
+              <Eye size={14} /> Preview
+            </button>
+            <button
+              onClick={() => setActiveTab('code')}
+              className={`h-9 px-3 text-xs font-medium flex items-center gap-1.5 border-l border-ink-200 ${activeTab === 'code' ? 'bg-ink-900 text-white' : 'bg-white text-ink-700'}`}
+            >
+              <Code2 size={14} /> Code
+            </button>
+          </div>
+
+          <button
+            onClick={() => setShowProfile(true)}
+            className={`h-9 px-3 rounded-md text-xs font-semibold flex items-center gap-1.5 border ${
+              hasKey() ? 'border-accent/30 bg-accent-soft text-accent' : 'border-amber-300 bg-amber-50 text-amber-800'
+            }`}
+          >
+            <User size={14} /> Profile
+          </button>
+          <button
+            onClick={exportPdf}
+            disabled={!pdfUrl}
+            className="h-9 px-3 rounded-md bg-ink-900 text-white text-xs font-semibold flex items-center gap-1.5 disabled:opacity-40"
+          >
+            <Download size={14} /> PDF
+          </button>
+          <button onClick={logout} className="h-9 w-9 rounded-md border border-ink-200 text-ink-500 hover:text-ink-900 flex items-center justify-center" title="Log out">
+            <LogOut size={14} />
+          </button>
+        </div>
+      </header>
+
+      <div className="flex-1 min-h-0 flex">
+        {/* Sessions */}
+        <aside className="w-52 shrink-0 border-r border-ink-200 bg-white flex flex-col">
+          <div className="p-3 border-b border-ink-200">
+            <button
+              onClick={() => createSession()}
+              className="w-full h-9 rounded-md bg-ink-900 text-white text-xs font-semibold flex items-center justify-center gap-1.5"
+            >
+              <Plus size={14} /> New chat
+            </button>
+          </div>
+          <div className="flex-1 overflow-auto p-2 space-y-1">
+            {sessions.length === 0 && (
+              <p className="text-xs text-ink-500 px-2 py-4">No chats yet.</p>
+            )}
+            {sessions.map((s) => (
+              <button
+                key={s.session_id}
+                onClick={() => hydrateSession(s.session_id)}
+                className={`w-full text-left rounded-md px-2.5 py-2 group ${
+                  s.session_id === sessionId ? 'bg-accent-soft' : 'hover:bg-ink-50'
+                }`}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <p className="text-xs font-medium text-ink-900 line-clamp-2">{s.title}</p>
+                  <Trash2
+                    size={12}
+                    className="shrink-0 mt-0.5 text-ink-200 opacity-0 group-hover:opacity-100 hover:text-red-600"
+                    onClick={(e) => deleteSession(s.session_id, e)}
+                  />
+                </div>
+                <p className="mt-1 text-[10px] text-ink-500 truncate">
+                  {s.active_provider} · {s.active_model}
+                </p>
+              </button>
+            ))}
+          </div>
+        </aside>
+
+        {/* Chat */}
+        <section className="w-[420px] shrink-0 border-r border-ink-200 bg-white flex flex-col min-h-0">
+          <div className="px-4 py-3 border-b border-ink-200 space-y-3">
+            <div className="flex gap-1.5">
+              {['classic', 'modern', 'executive'].map((t) => (
+                <button
+                  key={t}
+                  onClick={() => setSelectedTemplate(t)}
+                  className={`flex-1 h-8 rounded-md text-[11px] font-semibold capitalize border ${
+                    selectedTemplate === t
+                      ? 'bg-ink-900 text-white border-ink-900'
+                      : 'bg-white text-ink-600 border-ink-200'
+                  }`}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+            {zones.length > 0 && (
+              <p className="text-[11px] text-ink-500">Zones: {zones.join(' · ')}</p>
+            )}
+          </div>
+
+          <div className="flex-1 overflow-auto px-4 py-4 space-y-4">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-semibold uppercase tracking-wider text-ink-500">Chat</p>
+              <button onClick={() => setShowAts((v) => !v)} className="text-[11px] text-ink-500 hover:text-accent flex items-center gap-1">
+                <Target size={12} /> ATS
+              </button>
+            </div>
+
+            {showAts && (
+              <div className="rounded-md border border-ink-200 p-3 space-y-2 bg-ink-50">
+                {atsScore && (
+                  <p className="text-sm font-semibold text-ink-900">
+                    Match {Math.round(atsScore.total_score)}%
+                    <span className="ml-2 text-xs font-normal text-ink-500">
+                      semantic {Math.round(atsScore.semantic_match)}% · keywords {Math.round(atsScore.keyword_match)}%
+                    </span>
+                  </p>
+                )}
+                <textarea
+                  value={jd}
+                  onChange={(e) => setJd(e.target.value)}
+                  placeholder="Paste job description…"
+                  className="w-full h-24 rounded-md border border-ink-200 p-2 text-xs resize-none outline-none focus:border-accent"
+                />
+                <button
+                  onClick={handleScore}
+                  disabled={scoringLoading}
+                  className="w-full h-8 rounded-md bg-ink-900 text-white text-xs font-semibold disabled:opacity-40"
+                >
+                  {scoringLoading ? 'Scoring…' : 'Score match'}
                 </button>
               </div>
-            </section>
+            )}
 
-            <section className="space-y-8">
-              <div className="flex items-center justify-between">
-                <h3 className="text-xs font-black uppercase tracking-[0.25em] text-slate-400 flex items-center gap-2"><MessageSquare size={14} /> AI Artifacts Chat</h3>
-                {isInitialized && (
-                  <div className="flex items-center gap-3">
-                    <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Target:</span>
-                    <select 
-                      value={selectedSection} 
-                      onChange={(e) => setSelectedSection(e.target.value)}
-                      className="bg-slate-50 border border-black/5 rounded-lg px-3 py-1 text-[10px] font-black uppercase tracking-widest outline-none focus:ring-2 focus:ring-blue-600/20"
-                    >
-                      {sections.map(s => <option key={s} value={s}>{s}</option>)}
-                    </select>
+            {messages.map((m, i) => (
+              <div key={m.id || i} className="space-y-2">
+                <div className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div
+                    className={`max-w-[90%] rounded-lg px-3.5 py-2.5 text-sm leading-relaxed ${
+                      m.role === 'user'
+                        ? 'bg-accent text-white'
+                        : m.status === 'error'
+                          ? 'bg-red-50 text-red-800 border border-red-100'
+                          : 'bg-ink-50 text-ink-900 border border-ink-200'
+                    }`}
+                  >
+                    {m.content}
+                    {m.role === 'assistant' && (m.provider || m.meta?.zones_changed?.length) ? (
+                      <p className="mt-2 text-[10px] opacity-60">
+                        {[m.provider, m.model].filter(Boolean).join(' · ')}
+                        {m.meta?.zones_changed?.length ? ` · ${m.meta.zones_changed.join(', ')}` : ''}
+                      </p>
+                    ) : null}
                   </div>
-                )}
-              </div>
-              <div className="space-y-10 pb-10">
-                {!isInitialized && (
-                  <div className="flex flex-wrap gap-2 mb-4">
-                    {['Professional', 'Academic', 'Modern', 'Executive'].map(mode => (
-                      <button 
-                        key={mode}
-                        onClick={() => setInputValue(`Create a ${mode} resume based on: `)}
-                        className="px-4 py-2 bg-slate-50 border border-black/5 rounded-full text-[10px] font-black uppercase tracking-widest text-slate-500 hover:bg-blue-600 hover:text-white transition-all"
+                </div>
+                {m.type === 'proposal' && m.variants && (
+                  <div className="space-y-2 pl-2 border-l-2 border-ink-200">
+                    {m.variants.map((v) => (
+                      <button
+                        key={v.id}
+                        onClick={() => applyVariant(m.sessionId, v.id)}
+                        className="w-full text-left rounded-md border border-ink-200 bg-white p-3 hover:border-accent"
                       >
-                        {mode} Mode
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-accent">{v.intent}</p>
+                        <p className="mt-1 text-xs text-ink-700">{v.summary}</p>
                       </button>
                     ))}
                   </div>
                 )}
-                {messages.map((m, i) => (
-                  <div key={i} className="space-y-4">
-                    <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                      <div className={`max-w-[90%] p-7 rounded-[2.5rem] text-sm font-bold leading-[1.6] shadow-xl ${m.role === 'user' ? 'bg-blue-600 text-white rounded-tr-none' : 'bg-slate-100 text-slate-800 rounded-tl-none border border-black/5'}`}>
-                        {m.content}
-                      </div>
-                    </motion.div>
-                    
-                    {m.type === 'proposal' && (
-                      <div className="grid grid-cols-1 gap-4 pl-4 border-l-4 border-slate-100 ml-4 py-2">
-                        {m.variants.map(v => (
-                          <motion.button 
-                            key={v.id}
-                            whileHover={{ x: 4 }}
-                            onClick={() => applyVariant(m.sessionId, v.id, m.targetSection)}
-                            className="bg-white border border-black/5 p-6 rounded-[2rem] text-left hover:shadow-2xl transition-all space-y-3 group"
-                          >
-                             <div className="flex items-center justify-between">
-                               <span className="px-3 py-1 bg-slate-100 rounded-full text-[10px] font-black uppercase tracking-widest text-slate-500 group-hover:bg-blue-600 group-hover:text-white transition-all">{v.intent}</span>
-                               <ChevronRight size={14} className="text-slate-300 group-hover:text-blue-600 transition-all" />
-                             </div>
-                             <p className="text-xs font-bold text-slate-600 leading-relaxed">{v.summary}</p>
-                          </motion.button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
-                {loading && (
-                   <div className="flex justify-start">
-                     <div className="px-8 py-6 bg-slate-50 rounded-[2rem] rounded-tl-none border border-black/5">
-                        <div className="flex gap-2">
-                           <motion.div animate={{ scale: [1, 1.5, 1] }} transition={{ repeat: Infinity, duration: 1 }} className="w-2 h-2 bg-blue-600 rounded-full" />
-                           <motion.div animate={{ scale: [1, 1.5, 1] }} transition={{ repeat: Infinity, duration: 1, delay: 0.2 }} className="w-2 h-2 bg-blue-600 rounded-full" />
-                           <motion.div animate={{ scale: [1, 1.5, 1] }} transition={{ repeat: Infinity, duration: 1, delay: 0.4 }} className="w-2 h-2 bg-blue-600 rounded-full" />
-                        </div>
-                     </div>
-                   </div>
-                )}
               </div>
-            </section>
+            ))}
+            {loading && (
+              <div className="text-xs text-ink-500 flex items-center gap-2">
+                <RefreshCw size={12} className="animate-spin" /> Working…
+              </div>
+            )}
+            <div ref={chatEndRef} />
           </div>
-          <div className="p-10 border-t border-black/5 bg-slate-50/30">
-            <div className="relative group">
-              <input value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyPress={(e) => e.key === 'Enter' && handleInitOrEdit()} placeholder={isInitialized ? `Refining ${selectedSection}...` : "Paste bio to start..."} className="w-full pl-8 pr-24 py-7 bg-white border border-black/10 rounded-[2.5rem] shadow-2xl focus:ring-4 focus:ring-blue-600/10 outline-none transition-all font-black text-sm" />
-              <button onClick={handleInitOrEdit} disabled={loading} className="absolute right-3 top-1/2 -translate-y-1/2 p-5 bg-blue-600 text-white rounded-2xl shadow-xl hover:scale-110 active:scale-90 transition-all disabled:opacity-50 disabled:scale-100"><Send size={24} /></button>
+
+          <div className="border-t border-ink-200 p-3 space-y-2">
+            <button
+              onClick={handleSqueeze}
+              disabled={loading || !latexCode}
+              className="w-full h-8 rounded-md border border-ink-200 text-xs font-medium text-ink-700 hover:bg-ink-50 disabled:opacity-40 flex items-center justify-center gap-1.5"
+            >
+              <Layers size={13} /> Tighten layout
+            </button>
+            <div className="flex gap-2">
+              <input
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleChat()}
+                placeholder={messages.some((m) => m.role === 'user') ? 'Ask for an edit…' : 'Paste your bio to start…'}
+                className="flex-1 h-11 rounded-md border border-ink-200 px-3 text-sm outline-none focus:border-accent"
+              />
+              <button
+                onClick={handleChat}
+                disabled={loading}
+                className="h-11 w-11 rounded-md bg-accent text-white flex items-center justify-center disabled:opacity-40"
+              >
+                <Send size={16} />
+              </button>
             </div>
           </div>
-        </div>
+        </section>
 
-        <div className="flex-1 bg-slate-100/30 flex flex-col relative overflow-hidden backdrop-blur-sm">
-          <AnimatePresence mode="wait">
-            {activeTab === 'preview' ? (
-              <motion.div key="p" initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 1.02 }} className="flex-1 p-16 overflow-auto flex justify-center">
-                <div className="w-full max-w-[1050px] bg-white shadow-[0_60px_100px_-40px_rgba(0,0,0,0.1)] rounded-none border border-black/5 relative">
-                  {pdfUrl ? <iframe src={`${pdfUrl}#toolbar=0`} className="w-full h-full border-none min-h-[1400px]" /> : <div className="h-full min-h-[1400px] flex items-center justify-center text-slate-200 font-black text-4xl animate-pulse">RENDER_ACTIVE</div>}
-                </div>
-              </motion.div>
-            ) : (
-              <motion.div key="c" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="flex-1 p-16 overflow-hidden">
-                <div className="h-full w-full max-w-[1400px] mx-auto rounded-[4rem] shadow-2xl overflow-hidden bg-[#0c0c0d] border border-white/5 flex flex-col">
-                   <div className="px-12 py-7 bg-white/5 flex items-center justify-between border-b border-white/5">
-                     <div className="flex items-center gap-6">
-                       <span className="text-[10px] font-black uppercase tracking-[0.4em] text-white/40">MASTER_SOURCE</span>
-                       <div className={`flex items-center gap-2 px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest ${health.is_healthy ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>{health.is_healthy ? <Zap size={12} className="fill-current" /> : <ShieldAlert size={12} />} {health.is_healthy ? 'Stable' : `Warnings (${health.score})`}</div>
-                     </div>
-                     <div className="flex items-center gap-4">
-                        <button 
-                          onClick={handleSync}
-                          disabled={loading}
-                          className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-2"
-                        >
-                          {loading ? <RefreshCw size={12} className="animate-spin" /> : <RefreshCw size={12} />}
-                          Sync & Render
-                        </button>
-                        <div className="flex gap-2.5">
-                          <div className="w-3 h-3 rounded-full bg-white/5" />
-                          <div className="w-3 h-3 rounded-full bg-white/5" />
-                          <div className="w-3 h-3 rounded-full bg-white/5" />
-                        </div>
-                     </div>
-                   </div>
-                   <div className="flex-1 relative flex">
-                      <div className="w-20 bg-white/5 border-r border-white/5 flex flex-col items-center py-10 gap-8 text-white/20"><Layout size={20} /><Sparkles size={20} /><Settings size={20} /></div>
-                      <div className="flex-1 overflow-hidden">
-                        <AceEditor mode="latex" theme="github_dark" value={latexCode} onChange={setLatexCode} name="ae" width="100%" height="100%" fontSize={17} showPrintMargin={false} setOptions={{ useWorker: false }} style={{ background: 'transparent' }} className="p-10 font-mono" />
+        {/* Artifact */}
+        <section className="flex-1 min-w-0 bg-ink-100/60 flex flex-col">
+          {activeTab === 'preview' ? (
+            <div className="flex-1 overflow-auto p-6 flex justify-center">
+              <div className="w-full max-w-3xl bg-white border border-ink-200 shadow-sm min-h-[80vh]">
+                {pdfUrl ? (
+                  <iframe src={`${pdfUrl}#toolbar=0`} title="resume" className="w-full min-h-[80vh] border-0" />
+                ) : (
+                  <div className="min-h-[80vh] flex flex-col items-center justify-center text-ink-400 gap-2">
+                    <FileText size={28} />
+                    <p className="text-sm">Preview appears after generate or sync</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1 p-4 min-h-0 flex flex-col">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs font-semibold uppercase tracking-wider text-ink-500">LaTeX source</p>
+                <button
+                  onClick={handleSync}
+                  disabled={loading}
+                  className="h-8 px-3 rounded-md bg-ink-900 text-white text-xs font-semibold flex items-center gap-1.5 disabled:opacity-40"
+                >
+                  <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
+                  Sync & render
+                </button>
+              </div>
+              <div className="flex-1 min-h-0 rounded-md overflow-hidden border border-ink-200 bg-white">
+                <AceEditor
+                  mode="latex"
+                  theme="github"
+                  value={latexCode}
+                  onChange={setLatexCode}
+                  name="latex-editor"
+                  width="100%"
+                  height="100%"
+                  fontSize={14}
+                  showPrintMargin={false}
+                  setOptions={{ useWorker: false }}
+                  className="font-mono"
+                />
+              </div>
+            </div>
+          )}
+        </section>
+      </div>
+
+      {showProfile && (
+        <div className="fixed inset-0 z-50 bg-ink-950/40 flex items-center justify-center p-4" onClick={() => setShowProfile(false)}>
+          <div className="w-full max-w-lg bg-white rounded-lg border border-ink-200 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-ink-200">
+              <div>
+                <h3 className="font-display text-lg text-ink-900">Profile</h3>
+                <p className="text-xs text-ink-500 mt-0.5">{profile.username}</p>
+              </div>
+              <button onClick={() => setShowProfile(false)} className="text-ink-400 hover:text-ink-900"><X size={18} /></button>
+            </div>
+
+            <div className="flex border-b border-ink-200 px-5">
+              {[
+                { id: 'keys', label: 'API keys' },
+                { id: 'password', label: 'Password' },
+              ].map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => { setProfileTab(t.id); setSaveError(''); setPwdMsg(''); }}
+                  className={`mr-4 py-3 text-xs font-semibold uppercase tracking-wider ${
+                    profileTab === t.id ? 'text-accent border-b-2 border-accent' : 'text-ink-500'
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+
+            {profileTab === 'keys' ? (
+              <>
+                <div className="p-5 space-y-4 max-h-[55vh] overflow-auto">
+                  <p className="text-xs text-ink-500 leading-relaxed">
+                    Keys stay on the server. Leave a field blank to keep the existing key.
+                    Paste a new value only when you want to update it.
+                  </p>
+                  {Object.keys(PROVIDER_MODELS).map((p) => (
+                    <div key={p} className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold uppercase tracking-wide text-ink-600">{p}</span>
+                        {profile.keys_configured?.[p] ? (
+                          <span className="text-[10px] font-semibold uppercase tracking-wide text-accent">Saved on profile</span>
+                        ) : (
+                          <span className="text-[10px] font-semibold uppercase tracking-wide text-amber-700">Not set</span>
+                        )}
                       </div>
-                   </div>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          autoComplete="off"
+                          autoCorrect="off"
+                          spellCheck={false}
+                          name={`api-key-${p}`}
+                          value={keyDrafts[p] || ''}
+                          onChange={(e) => setKeyDrafts((prev) => ({ ...prev, [p]: e.target.value }))}
+                          placeholder={profile.keys_configured?.[p] ? '••••••••  (paste to replace)' : `Paste ${p} API key`}
+                          className="flex-1 px-3 py-2 rounded-md border border-ink-200 text-sm outline-none focus:border-accent font-mono"
+                        />
+                        {profile.keys_configured?.[p] && (
+                          <button
+                            type="button"
+                            onClick={() => clearProviderKey(p)}
+                            className="px-2 text-[10px] font-semibold uppercase tracking-wide text-ink-400 hover:text-red-600"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  {saveError && (
+                    <p className="text-sm text-red-700 bg-red-50 border border-red-100 rounded-md px-3 py-2">{saveError}</p>
+                  )}
                 </div>
-              </motion.div>
+                <div className="px-5 py-4 border-t border-ink-200">
+                  <button
+                    onClick={saveProfileKeys}
+                    disabled={savingKeys}
+                    className={`w-full h-10 rounded-md text-sm font-semibold text-white disabled:opacity-40 ${
+                      keySaved ? 'bg-accent-mid' : 'bg-accent hover:bg-accent-mid'
+                    }`}
+                  >
+                    {savingKeys ? 'Saving…' : keySaved ? 'Keys saved' : 'Save API keys'}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="p-5 space-y-3">
+                  <label className="block space-y-1.5">
+                    <span className="text-xs font-medium text-ink-500">Current password</span>
+                    <input
+                      type="password"
+                      autoComplete="current-password"
+                      value={pwdCurrent}
+                      onChange={(e) => setPwdCurrent(e.target.value)}
+                      className="w-full px-3 py-2 rounded-md border border-ink-200 text-sm outline-none focus:border-accent"
+                    />
+                  </label>
+                  <label className="block space-y-1.5">
+                    <span className="text-xs font-medium text-ink-500">New password</span>
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      value={pwdNew}
+                      onChange={(e) => setPwdNew(e.target.value)}
+                      className="w-full px-3 py-2 rounded-md border border-ink-200 text-sm outline-none focus:border-accent"
+                    />
+                  </label>
+                  {pwdMsg && (
+                    <p className={`text-sm rounded-md px-3 py-2 border ${
+                      pwdMsg.includes('updated') ? 'text-accent bg-accent-soft border-accent/20' : 'text-red-700 bg-red-50 border-red-100'
+                    }`}>{pwdMsg}</p>
+                  )}
+                </div>
+                <div className="px-5 py-4 border-t border-ink-200">
+                  <button
+                    onClick={changePassword}
+                    disabled={!pwdCurrent || !pwdNew}
+                    className="w-full h-10 rounded-md bg-ink-900 text-white text-sm font-semibold disabled:opacity-40"
+                  >
+                    Update password
+                  </button>
+                </div>
+              </>
             )}
-          </AnimatePresence>
+          </div>
         </div>
-      </main>
+      )}
     </div>
   );
 }
-export default App;
