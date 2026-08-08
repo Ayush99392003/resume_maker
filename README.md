@@ -1,95 +1,138 @@
 # AI LaTeX Resume Maker
 
-A professional, AI-powered resume builder that bridges the gap between AI-driven content generation and high-quality LaTeX typesetting.
+Chat-first, agentic resume builder: AI fills **dynamic LaTeX zones**, you iterate in chat, and the right panel toggles **Code / Render**. Multi-provider LLM routing (Groq, OpenAI, Gemini, Anthropic, Azure, AWS Bedrock) with durable sessions, login/profile API keys, and mid-chat model switching.
 
-## 🚀 Features
+## Features
 
-- **Gemini-Powered Engine**: Uses Gemini 1.5 Pro for content generation, JD optimization, and self-correcting LaTeX compilation.
-- **Artifacts UI**: A Claude-style split-screen interface with a real-time Chat interface and a PDF/Source code preview.
-- **ATS Radar**: Semantic matching and AI-driven keyword extraction using Gemini embeddings (`text-embedding-004`).
-- **Robust Sectional Editing**: Granularly edit specific resume sections without affecting the rest of the document.
-- **Self-Correction Loop**: Automatically repairs common LaTeX compilation errors via an AI-driven feedback loop.
-- **Direct Source Editing**: Edit LaTeX source code manually and use the "Sync & Render" feature to update the PDF instantly.
+- **Auth + profile keys** — register/login; store provider API keys server-side (never echoed raw to the UI)
+- **Chat resume loop** — paste a bio, refine via natural language
+- **Zone specialists** — router classifies intent → HEADER / SUMMARY / EXPERIENCE / EDUCATION / SKILLS agents
+- **Dynamic zones** — `% ZONE:NAME:START/END` markers keep the skeleton stable
+- **LLM router** — explicit `LLM_PROVIDER` + `MODEL_NAME` (or per-turn / UI picker)
+- **Durable sessions** — JSON under `backend/data/sessions/` (survives restarts)
+- **Soft-fail compile** — `/chat` and `/chat/apply` keep LaTeX when PDF fails; UI shows the compile note
+- **Tectonic compile** — PDF with AI fix retries
+- **ATS tool** — secondary keyword / semantic match (optional Gemini embeddings)
 
-## 🏗️ Technical Architecture
+## Architecture
 
-### Backend (Python/FastAPI)
+```text
+frontend (React)
+    → FastAPI
+        → auth_store (profiles / tokens)
+        → session_store (chat history + latex)
+        → zone agents + ai_agent
+        → llm_router/{groq,openai,gemini,anthropic,azure,aws}
+        → Tectonic (backend/bin or PATH)
+```
 
-- **Core Engine**: FastAPI for asynchronous request handling.
-- **AI Agent**: Orchestrates Gemini API calls for structured JSON outputs.
-- **Compiler**: Uses the **Tectonic** LaTeX engine for fast, non-interactive PDF generation.
-- **Parser**: A custom robust regex-based parser for managing sectional LaTeX updates.
-- **Scorer**: Calculates job match percentages using cosine similarity of Gemini embeddings.
+## Templates
 
-### Frontend (React/Vite)
+| Name | Engine | Status on Windows + Tectonic 0.16.9 |
+|------|--------|--------------------------------------|
+| **modern** (default) | `article` | Works — use this for PDF |
+| executive | `article`-style | Prefer for layout variety |
+| classic | `moderncv` | Unreliable — Fontconfig / crash; LaTeX edits may still save |
 
-- **UI Components**: Built with Tailwind CSS and Framer Motion for a premium, responsive aesthetic.
-- **Editor**: Uses `AceEditor` for high-performance LaTeX syntax highlighting and source editing.
-- **Icons**: Powered by `lucide-react`.
-- **Animations**: Fluid transitions and premium dark-mode styling.
+Always start a **new chat with `modern`** if you need a working preview PDF.
 
-## 🛠️ Setup Instructions
+## Setup
 
 ### Prerequisites
 
-- Docker & Docker Compose (for Containerized)
-- Python 3.9+ & Node.js 18+ (for Local Dev)
-- Tectonic installed on host ([Installation Guide](https://tectonic-typesetting.org/install/))
-- Gemini API Key
+- Python 3.9+, Node 18+
+- [Tectonic](https://tectonic-typesetting.org/install/) **or** place `tectonic.exe` in `backend/bin/`
+- At least one provider API key (Groq recommended)
 
-### Option 1: Containerized (Fastest)
+### Environment
+
+Copy `.env.template` → `.env`:
+
+```env
+LLM_PROVIDER=groq
+MODEL_NAME=llama-3.3-70b-versatile
+GROQ_API_KEY=your_key_here
+```
+
+Supported providers: `groq`, `openai`, `gemini`, `anthropic`, `azure`, `aws`. Selection is **explicit** — the chosen provider’s key must be set (env or Profile → API keys).
+
+### Local development
+
+```bash
+# Backend
+cd backend
+python -m venv .venv
+# Windows PowerShell:
+.\.venv\Scripts\Activate.ps1
+# or with uv:
+uv run --python .venv\Scripts\python.exe python main.py
+
+pip install -r requirements.txt   # if not using uv sync
+python main.py
+
+# Frontend (separate terminal)
+cd frontend
+npm install
+npm run dev
+```
+
+- UI: http://localhost:3000  
+- API: http://localhost:8000 /docs  
+
+**Port already in use (Errno 10048):** another process holds 8000. Free it, then restart:
+
+```powershell
+Get-NetTCPConnection -LocalPort 8000 | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+```
+
+### Docker
 
 ```bash
 docker-compose up --build
 ```
 
-The application will be available at `http://localhost:3000`.
+Session/profile data live under `backend/data` (gitignored).
 
-### Option 2: Local Development (Best for iteration)
+## API (high level)
 
-1. **Environment Setup**:
-   - Create a `.env` file in the root:
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /auth/register` · `/login` · `/logout` | Auth |
+| `GET /auth/me` | Current user + which keys are configured |
+| `PUT /auth/profile/keys` | Save provider keys (empty fields do not wipe) |
+| `POST /sessions` | Create chat (`template_name` default: `modern`) |
+| `GET /sessions` · `GET /sessions/{id}` | List / load |
+| `PATCH /sessions/{id}/model` | Switch provider/model |
+| `POST /chat` | Agentic turn (profile key via Bearer) |
+| `POST /chat/apply` | Apply a proposal variant (soft-fail compile) |
+| `POST /compile` | Render PDF |
+| `GET /providers` | Defaults + which env keys are present |
 
-     ```env
-     GEMINI_API_KEY=your_key_here
-     ```
+## Zones
 
-2. **Backend**:
+Templates in `backend/templates/` use markers like:
 
-   ```bash
-   cd backend
-   python -m venv venv
-   .\venv\Scripts/activate  # Windows
-   pip install -r requirements.txt
-   python main.py
-   ```
-
-   Backend runs at `http://localhost:8000`.
-
-3. **Frontend**:
-
-   ```bash
-   cd frontend
-   npm install
-   npm run dev
-   ```
-
-   Frontend runs at `http://localhost:3000` with automated proxy to backend.
-
-## 📂 Project Structure
-
-```text
-resume_maker/
-├── backend/
-│   ├── core/           # Business logic (AI, Compiler, Parser, Scaler)
-│   ├── templates/      # LaTeX template library
-│   └── main.py         # API entry point
-├── frontend/
-│   ├── src/            # React application source
-│   └── vite.config.js  # Build and proxy config
-└── docker-compose.yml  # Orchestration
+```latex
+% ZONE:EXPERIENCE:START
+...
+% ZONE:EXPERIENCE:END
 ```
 
-## 📝 License
+Agents update zone interiors only; packages and layout stay fixed.
+
+## Ops notes
+
+- **Tectonic CLI:** v0.16+ uses `tectonic -X compile` (not legacy `--noninteractive`).
+- **Logging:** `resume_maker.api` ASCII-safe logs (Windows-friendly).
+- **Secrets:** do not commit `.env` or `backend/data/`. Rotate any key pasted into chat.
+- Work log / incident history: see [`logs_work.md`](logs_work.md).
+
+## Future
+
+- Research paper document type (same zone + agent pattern)
+- Fix classic/`moderncv` under Tectonic on Windows
+- Multi-user cloud sync beyond local JSON profiles
+
+## License
 
 MIT
