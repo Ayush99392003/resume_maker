@@ -13,11 +13,11 @@ class SectionalParser:
     """Parses and extracts sections from LaTeX code."""
 
     def __init__(self):
-        # Pattern to find \section{Title} until next section or end
+        # Match \section{...} and \section*{...}
         self.SECTION_PATTERN = re.compile(
-            r"(?P<raw>\\section\{(?P<title>(?:[^{}]|\{[^{}]*\})+)\}"
+            r"(?P<raw>\\section\*?\{(?P<title>(?:[^{}]|\{[^{}]*\})+)\}"
             r"(?P<content>.*?))"
-            r"(?=\\section|\\end\{document\}|$)",
+            r"(?=\\section\*?|\\end\{document\}|$)",
             re.DOTALL,
         )
 
