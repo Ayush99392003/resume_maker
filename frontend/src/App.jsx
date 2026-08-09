@@ -64,13 +64,46 @@ export default function App() {
   const [showAts, setShowAts] = useState(false);
   const [selectedTemplate, setSelectedTemplate] = useState('modern');
   const [zones, setZones] = useState([]);
+  const [zoneCatalog, setZoneCatalog] = useState([]);
+  const [overleafUrl, setOverleafUrl] = useState('');
   const [sessionId, setSessionId] = useState(() => localStorage.getItem('rm_session_id') || '');
   const [sessions, setSessions] = useState([]);
   const [provider, setProvider] = useState('groq');
   const [model, setModel] = useState('llama-3.3-70b-versatile');
   const [providerInfo, setProviderInfo] = useState(null);
+  // New-chat setup: either template URL/paste OR zone selection
+  const [setupMode, setSetupMode] = useState(false);
+  const [setupPath, setSetupPath] = useState('url'); // 'url' | 'zones'
+  const [setupCatalog, setSetupCatalog] = useState([]);
+  const [setupSelected, setSetupSelected] = useState([]);
+  const [setupLatexPaste, setSetupLatexPaste] = useState('');
+  const [setupLoading, setSetupLoading] = useState(false);
+  const [setupError, setSetupError] = useState('');
+  const [setupCustomDesc, setSetupCustomDesc] = useState('');
+  const [compileNote, setCompileNote] = useState('');
+  const [compatNote, setCompatNote] = useState('');
+  const [autoSyncing, setAutoSyncing] = useState(false);
   const chatEndRef = useRef(null);
   const pdfUrlRef = useRef('');
+  const autoSyncSkipRef = useRef(false);
+
+  const applyZoneState = (sessionOrCatalog, latex) => {
+    if (sessionOrCatalog?.zones) {
+      const order = sessionOrCatalog.zone_order || sessionOrCatalog.zones.map((z) => z.zone_no);
+      const zmap = Object.fromEntries(sessionOrCatalog.zones.map((z) => [z.zone_no, z]));
+      const cat = order.map((n) => zmap[n]).filter(Boolean).map((z) => ({
+        zone_no: z.zone_no,
+        description: z.description || `Zone ${z.zone_no}`,
+        kind: z.kind,
+      }));
+      setZoneCatalog(cat);
+      setZones(cat.map((z) => String(z.zone_no)));
+    } else if (Array.isArray(sessionOrCatalog)) {
+      setZoneCatalog(sessionOrCatalog);
+      setZones(sessionOrCatalog.map((z) => String(z.zone_no ?? z)));
+    }
+    if (latex != null) setLatexCode(latex);
+  };
 
   const hasKey = (p = provider) =>
     Boolean(profile?.keys_configured?.[p]);
@@ -155,39 +188,279 @@ export default function App() {
     setSessions(resp.data.sessions || []);
   };
 
-  const hydrateSession = async (id) => {
-    const resp = await axios.get(`${API_BASE}/sessions/${id}`);
-    const s = resp.data;
+  const resetSetupState = () => {
+    setSetupPath('url');
+    setSetupCatalog([]);
+    setSetupSelected([]);
+    setSetupLatexPaste('');
+    setSetupError('');
+    setSetupCustomDesc('');
+    setSetupLoading(false);
+  };
+
+  const compileAndRender = useCallback(async (latex, sid, { quiet = false, persist = !quiet } = {}) => {
+    if (!(latex || '').trim()) return;
+    if (!quiet) setLoading(true);
+    else setAutoSyncing(true);
+    try {
+      const resp = await axios.post(`${API_BASE}/compile`, {
+        latex_code: latex,
+        session_id: sid || undefined,
+      });
+      const nextLatex = resp.data.latex_code || latex;
+      if (nextLatex && nextLatex !== latex) {
+        autoSyncSkipRef.current = true;
+        setLatexCode(nextLatex);
+      }
+      if (resp.data.pdf_base64) {
+        updatePdf(resp.data.pdf_base64);
+        setCompileNote('');
+      } else {
+        setCompileNote(resp.data.compile_error || 'Compile failed');
+      }
+      if (persist && sid) {
+        const put = await axios.put(`${API_BASE}/sessions/${sid}/latex`, {
+          latex_code: nextLatex,
+        });
+        if (put.data?.latex_code && put.data.latex_code !== nextLatex) {
+          autoSyncSkipRef.current = true;
+          setLatexCode(put.data.latex_code);
+        }
+        if (put.data?.compat_notes?.length) {
+          setCompatNote(
+            `Adjusted for Windows Tectonic: ${put.data.compat_notes.join('; ')}`,
+          );
+        }
+      }
+      if (!quiet && resp.data.compile_error) {
+        setMessages((prev) => [
+          ...prev,
+          { role: 'assistant', content: resp.data.compile_error, status: 'error' },
+        ]);
+      }
+    } catch (e) {
+      const msg = errDetail(e, 'Compile failed');
+      setCompileNote(msg);
+      if (!quiet) {
+        setMessages((prev) => [
+          ...prev,
+          { role: 'assistant', content: msg, status: 'error' },
+        ]);
+      }
+    } finally {
+      if (!quiet) setLoading(false);
+      else setAutoSyncing(false);
+    }
+  }, [updatePdf]);
+
+  const enterChatFromSession = (s) => {
     setSessionId(s.session_id);
     localStorage.setItem('rm_session_id', s.session_id);
     setMessages(s.messages || []);
     setLatexCode(s.latex_code || '');
-    setSelectedTemplate(s.template_name || 'classic');
-    setProvider(s.active_provider || provider);
-    setModel(s.active_model || model);
+    applyZoneState(s, s.latex_code || '');
+    setPdfUrl('');
+    setAtsScore(null);
+    setCompileNote('');
+    if (s.compat_banner) {
+      setCompatNote(s.compat_banner);
+    } else if (s.compat_notes?.length) {
+      setCompatNote(`Adjusted for Windows Tectonic: ${s.compat_notes.join('; ')}`);
+    } else {
+      setCompatNote('');
+    }
+    setSetupMode(false);
+    resetSetupState();
     if (s.latex_code) {
-      try {
-        const c = await axios.post(`${API_BASE}/compile`, { latex_code: s.latex_code });
-        updatePdf(c.data.pdf_base64);
-      } catch (_) { /* tectonic may be missing */ }
+      compileAndRender(s.latex_code, s.session_id, { quiet: true });
     }
   };
 
-  const createSession = async () => {
-    const resp = await axios.post(`${API_BASE}/sessions`, {
-      template_name: selectedTemplate,
-      provider,
-      model,
-    });
+  const startNewChatSetup = () => {
+    setSetupMode(true);
+    resetSetupState();
+    setSessionId('');
+    localStorage.removeItem('rm_session_id');
+    setMessages([]);
+    setLatexCode('');
+    setPdfUrl('');
+    setAtsScore(null);
+    setZoneCatalog([]);
+    setZones([]);
+    setOverleafUrl('');
+  };
+
+  const hydrateSession = async (id) => {
+    const resp = await axios.get(`${API_BASE}/sessions/${id}`);
     const s = resp.data;
+    setSetupMode(false);
+    resetSetupState();
     setSessionId(s.session_id);
     localStorage.setItem('rm_session_id', s.session_id);
     setMessages(s.messages || []);
     setLatexCode(s.latex_code || '');
-    setPdfUrl('');
-    setAtsScore(null);
-    await loadSessions();
-    return s;
+    applyZoneState(s, s.latex_code || '');
+    setSelectedTemplate(s.template_name || 'classic');
+    setProvider(s.active_provider || provider);
+    setModel(s.active_model || model);
+    setOverleafUrl(s.source_url || '');
+    if (s.latex_code) {
+      compileAndRender(s.latex_code, s.session_id, { quiet: true, persist: false });
+    }
+  };
+
+  const loadZonesCatalog = async (templateName = selectedTemplate) => {
+    setSetupError('');
+    setSetupLoading(true);
+    try {
+      const resp = await axios.post(`${API_BASE}/setup/import`, {
+        template_name: templateName,
+      });
+      const catalog = resp.data.catalog || [];
+      setSetupCatalog(catalog);
+      setSetupSelected(catalog.map((z) => z.zone_no));
+      setLatexCode(resp.data.latex_code || '');
+    } catch (e) {
+      setSetupError(errDetail(e, 'Could not load zones'));
+    } finally {
+      setSetupLoading(false);
+    }
+  };
+
+  const toggleSetupZone = (zoneNo) => {
+    setSetupSelected((prev) => (
+      prev.includes(zoneNo)
+        ? prev.filter((n) => n !== zoneNo)
+        : [...prev, zoneNo]
+    ));
+  };
+
+  const addSetupCustomZone = () => {
+    const desc = (setupCustomDesc || '').trim();
+    if (!desc) return;
+    const tempNo = -(setupCatalog.length + 1);
+    setSetupCatalog((prev) => [
+      ...prev,
+      { zone_no: tempNo, description: desc, kind: 'custom', _pending: true },
+    ]);
+    setSetupSelected((prev) => [...prev, tempNo]);
+    setSetupCustomDesc('');
+  };
+
+  /** Path A: Overleaf URL or pasted .tex → session → chat + render */
+  const startChatFromUrl = async () => {
+    const url = (overleafUrl || '').trim();
+    const latex = (setupLatexPaste || '').trim();
+    if (!url && !latex) {
+      setSetupError('Paste an Overleaf URL or full LaTeX source');
+      return;
+    }
+    if (url && !latex && !/overleaf\.com|github\.com/i.test(url)) {
+      setSetupError(
+        'Link must be overleaf.com/latex/templates/… or a public project/GitHub URL',
+      );
+      return;
+    }
+    if (latex && !/\\documentclass/.test(latex)) {
+      setSetupError('Pasted LaTeX should include \\documentclass{...}');
+      return;
+    }
+    setSetupError('');
+    setSetupLoading(true);
+    try {
+      let softenedLatex = latex;
+      // Prefetch: URL download or paste preview compile (already Tectonic-softened)
+      if (url && !latex) {
+        const preview = await axios.post(`${API_BASE}/setup/import`, { url });
+        softenedLatex = preview.data.latex_code || '';
+        if (preview.data.compat_notes?.length) {
+          setCompatNote(
+            `Adjusted for Windows Tectonic: ${preview.data.compat_notes.join('; ')}`,
+          );
+        } else if (preview.data.warnings?.length) {
+          setCompatNote(preview.data.warnings.join(' · '));
+        }
+        if (preview.data.compile_error) {
+          setCompileNote(preview.data.compile_error);
+        }
+        if (preview.data.pdf_base64) updatePdf(preview.data.pdf_base64);
+        if (softenedLatex) setLatexCode(softenedLatex);
+      } else if (latex) {
+        const preview = await axios.post(`${API_BASE}/setup/import`, { latex });
+        softenedLatex = preview.data.latex_code || latex;
+        if (softenedLatex) setLatexCode(softenedLatex);
+        if (preview.data.compat_notes?.length) {
+          setCompatNote(
+            `Adjusted for Windows Tectonic: ${preview.data.compat_notes.join('; ')}`,
+          );
+        }
+        if (preview.data.pdf_base64) updatePdf(preview.data.pdf_base64);
+        if (preview.data.compile_error) setCompileNote(preview.data.compile_error);
+      }
+      const payload = { provider, model, template_name: selectedTemplate || 'modern' };
+      if (url && !latex) payload.source_url = url;
+      // Prefer softened source so session stores what actually compiles
+      if (softenedLatex) payload.latex = softenedLatex;
+      else if (latex) payload.latex = latex;
+      const created = await axios.post(`${API_BASE}/sessions`, payload);
+      enterChatFromSession(created.data);
+      await loadSessions();
+    } catch (e) {
+      setSetupError(errDetail(e, 'Could not start from template URL/LaTeX'));
+    } finally {
+      setSetupLoading(false);
+    }
+  };
+
+  /** Path B: bundled template + selected zones → session → chat */
+  const startChatFromZones = async () => {
+    if (!setupSelected.length) {
+      setSetupError('Select at least one zone');
+      return;
+    }
+    setSetupError('');
+    setSetupLoading(true);
+    try {
+      const included = setupSelected.filter((n) => n > 0);
+      const order = setupCatalog
+        .map((z) => z.zone_no)
+        .filter((n) => included.includes(n));
+      const customs = setupCatalog
+        .filter((z) => z._pending && setupSelected.includes(z.zone_no))
+        .map((z) => z.description);
+
+      const created = await axios.post(`${API_BASE}/sessions`, {
+        template_name: selectedTemplate,
+        provider,
+        model,
+        included_zone_nos: included,
+        zone_order: order,
+        custom_zones: customs,
+      });
+      enterChatFromSession(created.data);
+      await loadSessions();
+    } catch (e) {
+      setSetupError(errDetail(e, 'Could not start from zone selection'));
+    } finally {
+      setSetupLoading(false);
+    }
+  };
+
+  const addZone = async () => {
+    if (!sessionId || setupMode) return;
+    const desc = window.prompt('New zone description (e.g. Projects)', 'Projects');
+    if (!desc) return;
+    const resp = await axios.post(`${API_BASE}/sessions/${sessionId}/zones`, {
+      description: desc,
+    });
+    applyZoneState(resp.data.session, resp.data.latex_code);
+  };
+
+  const removeZone = async (zoneNo) => {
+    if (!sessionId || setupMode) return;
+    if (!window.confirm(`Remove zone ${zoneNo}?`)) return;
+    const resp = await axios.delete(`${API_BASE}/sessions/${sessionId}/zones/${zoneNo}`);
+    applyZoneState(resp.data.session, resp.data.latex_code);
   };
 
   useEffect(() => {
@@ -213,7 +486,12 @@ export default function App() {
           try { await hydrateSession(sid); } catch (_) {
             localStorage.removeItem('rm_session_id');
             setSessionId('');
+            setSetupMode(true);
+            resetSetupState();
           }
+        } else {
+          setSetupMode(true);
+          resetSetupState();
         }
       } catch (_) {
         localStorage.removeItem('rm_auth_token');
@@ -234,12 +512,20 @@ export default function App() {
     if (!latexCode) return;
     const t = setTimeout(async () => {
       try {
-        const s = await axios.post(`${API_BASE}/sections`, { latex_code: latexCode });
-        setZones(s.data.zones || []);
+        const s = await axios.post(`${API_BASE}/sections`, {
+          latex_code: latexCode,
+          session_id: sessionId || undefined,
+        });
+        if (s.data.catalog?.length) {
+          setZoneCatalog(s.data.catalog);
+          setZones(s.data.catalog.map((z) => String(z.zone_no)));
+        } else {
+          setZones(s.data.zones || []);
+        }
       } catch (_) { /* ignore */ }
     }, 600);
     return () => clearTimeout(t);
-  }, [latexCode]);
+  }, [latexCode, sessionId]);
 
   useEffect(() => {
     const models = PROVIDER_MODELS[provider] || [];
@@ -296,16 +582,16 @@ export default function App() {
 
   const handleChat = async () => {
     if (!inputValue.trim()) return;
+    if (setupMode || !sessionId) {
+      startNewChatSetup();
+      return;
+    }
     if (!hasKey()) {
       pushAssistant(`Add your ${provider.toUpperCase()} API key in Profile, then save.`, { status: 'error' });
       setShowProfile(true);
       return;
     }
-    let sid = sessionId;
-    if (!sid) {
-      const s = await createSession();
-      sid = s.session_id;
-    }
+    const sid = sessionId;
     const text = inputValue;
     setInputValue('');
     setMessages(prev => [...prev, { role: 'user', content: text }]);
@@ -318,6 +604,8 @@ export default function App() {
         ...llmPayload(),
       });
       setLatexCode(resp.data.latex_code || '');
+      if (resp.data.session) applyZoneState(resp.data.session, resp.data.latex_code);
+      else if (resp.data.catalog) applyZoneState(resp.data.catalog, resp.data.latex_code);
       if (resp.data.pdf_base64) updatePdf(resp.data.pdf_base64);
       setProvider(resp.data.provider || provider);
       setModel(resp.data.model || model);
@@ -371,19 +659,21 @@ export default function App() {
   };
 
   const handleSync = async () => {
-    setLoading(true);
-    try {
-      const resp = await axios.post(`${API_BASE}/compile`, { latex_code: latexCode });
-      updatePdf(resp.data.pdf_base64);
-      if (sessionId) {
-        await axios.put(`${API_BASE}/sessions/${sessionId}/latex`, { latex_code: latexCode });
-      }
-    } catch (e) {
-      pushAssistant(errDetail(e, 'Compile failed'), { status: 'error' });
-    } finally {
-      setLoading(false);
-    }
+    await compileAndRender(latexCode, sessionId, { quiet: false });
   };
+
+  // Light auto-sync + render after latex edits / chat updates
+  useEffect(() => {
+    if (!sessionId || setupMode || !(latexCode || '').trim()) return;
+    if (autoSyncSkipRef.current) {
+      autoSyncSkipRef.current = false;
+      return;
+    }
+    const t = setTimeout(() => {
+      compileAndRender(latexCode, sessionId, { quiet: true });
+    }, 1200);
+    return () => clearTimeout(t);
+  }, [latexCode, sessionId, setupMode, compileAndRender]);
 
   const handleSqueeze = async () => {
     if (!latexCode) return;
@@ -603,7 +893,7 @@ export default function App() {
         <aside className="w-52 shrink-0 border-r border-ink-200 bg-white flex flex-col">
           <div className="p-3 border-b border-ink-200">
             <button
-              onClick={() => createSession()}
+              onClick={startNewChatSetup}
               className="w-full h-9 rounded-md bg-ink-900 text-white text-xs font-semibold flex items-center justify-center gap-1.5"
             >
               <Plus size={14} /> New chat
@@ -637,27 +927,217 @@ export default function App() {
           </div>
         </aside>
 
-        {/* Chat */}
+        {/* Chat / Setup */}
         <section className="w-[420px] shrink-0 border-r border-ink-200 bg-white flex flex-col min-h-0">
-          <div className="px-4 py-3 border-b border-ink-200 space-y-3">
-            <div className="flex gap-1.5">
-              {['classic', 'modern', 'executive'].map((t) => (
-                <button
-                  key={t}
-                  onClick={() => setSelectedTemplate(t)}
-                  className={`flex-1 h-8 rounded-md text-[11px] font-semibold capitalize border ${
-                    selectedTemplate === t
-                      ? 'bg-ink-900 text-white border-ink-900'
-                      : 'bg-white text-ink-600 border-ink-200'
-                  }`}
-                >
-                  {t}
-                </button>
-              ))}
+          {(setupMode || !sessionId) ? (
+            <div className="flex-1 overflow-auto px-4 py-4 space-y-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wider text-ink-500">
+                  New chat setup
+                </p>
+                <p className="mt-1 text-sm text-ink-700">
+                  Pick either a template URL/LaTeX paste, or zone selection — then start chat.
+                </p>
+                <div className="mt-3 grid grid-cols-2 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => { setSetupPath('url'); setSetupError(''); }}
+                    className={`h-9 rounded-md text-[11px] font-semibold border ${
+                      setupPath === 'url'
+                        ? 'bg-ink-900 text-white border-ink-900'
+                        : 'bg-white text-ink-600 border-ink-200'
+                    }`}
+                  >
+                    Template URL
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSetupPath('zones');
+                      setSetupError('');
+                      if (!setupCatalog.length) loadZonesCatalog();
+                    }}
+                    className={`h-9 rounded-md text-[11px] font-semibold border ${
+                      setupPath === 'zones'
+                        ? 'bg-ink-900 text-white border-ink-900'
+                        : 'bg-white text-ink-600 border-ink-200'
+                    }`}
+                  >
+                    Zone selection
+                  </button>
+                </div>
+              </div>
+
+              {setupPath === 'url' && (
+                <div className="space-y-3">
+                  <div>
+                    <p className="text-[11px] font-semibold text-ink-500 mb-1.5">Overleaf template URL</p>
+                    <input
+                      value={overleafUrl}
+                      onChange={(e) => setOverleafUrl(e.target.value)}
+                      placeholder="https://www.overleaf.com/latex/templates/name/id"
+                      className="w-full h-9 rounded-md border border-ink-200 px-2 text-xs text-ink-800"
+                    />
+                    <p className="mt-1 text-[10px] text-ink-500 leading-snug">
+                      Use a public gallery link (`/latex/templates/…`) or a public project/read link.
+                      We download the zip (with .cls/.sty/images), convert zones, then render.
+                      Private projects: paste .tex below instead.
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[11px] font-semibold text-ink-500 mb-1.5">
+                      Or paste full LaTeX (no URL needed)
+                    </p>
+                    <textarea
+                      value={setupLatexPaste}
+                      onChange={(e) => setSetupLatexPaste(e.target.value)}
+                      placeholder={'\\documentclass{article}\n\\begin{document}\n...\n\\end{document}'}
+                      className="w-full h-36 rounded-md border border-ink-200 p-2 text-[11px] font-mono resize-none"
+                    />
+                    <p className="mt-1 text-[10px] text-ink-500 leading-snug">
+                      Paste the whole <code>.tex</code>, then start — we convert zones and render the PDF.
+                      Heavy packages (fontawesome / FiraMono) are softened for Windows Tectonic.
+                    </p>
+                  </div>
+                  {setupError && <p className="text-xs text-red-600">{setupError}</p>}
+                  <button
+                    type="button"
+                    onClick={startChatFromUrl}
+                    disabled={setupLoading}
+                    className="w-full h-10 rounded-md bg-accent text-white text-sm font-semibold disabled:opacity-40"
+                  >
+                    {setupLoading
+                      ? 'Importing & rendering…'
+                      : (setupLatexPaste || '').trim()
+                        ? 'Start chat & render pasted LaTeX'
+                        : 'Start chat from template URL'}
+                  </button>
+                </div>
+              )}
+
+              {setupPath === 'zones' && (
+                <div className="space-y-3">
+                  <div>
+                    <p className="text-[11px] font-semibold text-ink-500 mb-1.5">Base template</p>
+                    <div className="flex gap-1.5">
+                      {['classic', 'modern', 'executive'].map((t) => (
+                        <button
+                          key={t}
+                          type="button"
+                          onClick={() => {
+                            setSelectedTemplate(t);
+                            setSetupCatalog([]);
+                            setSetupSelected([]);
+                            loadZonesCatalog(t);
+                          }}
+                          className={`flex-1 h-8 rounded-md text-[11px] font-semibold capitalize border ${
+                            selectedTemplate === t
+                              ? 'bg-ink-900 text-white border-ink-900'
+                              : 'bg-white text-ink-600 border-ink-200'
+                          }`}
+                        >
+                          {t}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <p className="text-[11px] font-semibold text-ink-500 uppercase tracking-wider">
+                      Include zones
+                    </p>
+                    <button
+                      type="button"
+                      onClick={loadZonesCatalog}
+                      className="text-[11px] text-ink-500 hover:text-ink-800"
+                    >
+                      Reload
+                    </button>
+                  </div>
+                  <div className="space-y-1.5 max-h-56 overflow-auto">
+                    {setupCatalog.length === 0 && !setupLoading && (
+                      <p className="text-xs text-ink-500">Loading zones…</p>
+                    )}
+                    {setupCatalog.map((z) => {
+                      const checked = setupSelected.includes(z.zone_no);
+                      return (
+                        <label
+                          key={z.zone_no}
+                          className={`flex items-center gap-2 rounded-md border px-2.5 py-2 cursor-pointer ${
+                            checked ? 'border-accent bg-accent-soft/40' : 'border-ink-200 bg-white'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleSetupZone(z.zone_no)}
+                          />
+                          <span className="text-xs font-semibold text-ink-900">
+                            {z.zone_no > 0 ? `Zone ${z.zone_no}` : 'Custom'}
+                          </span>
+                          <span className="text-xs text-ink-600 truncate">{z.description}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      value={setupCustomDesc}
+                      onChange={(e) => setSetupCustomDesc(e.target.value)}
+                      placeholder="Add custom zone name…"
+                      className="flex-1 h-9 rounded-md border border-ink-200 px-2 text-xs"
+                      onKeyDown={(e) => e.key === 'Enter' && addSetupCustomZone()}
+                    />
+                    <button
+                      type="button"
+                      onClick={addSetupCustomZone}
+                      className="h-9 px-3 rounded-md border border-ink-200 text-xs font-semibold"
+                    >
+                      Add
+                    </button>
+                  </div>
+                  {setupError && <p className="text-xs text-red-600">{setupError}</p>}
+                  <button
+                    type="button"
+                    onClick={startChatFromZones}
+                    disabled={setupLoading || !setupSelected.length}
+                    className="w-full h-10 rounded-md bg-accent text-white text-sm font-semibold disabled:opacity-40"
+                  >
+                    {setupLoading ? 'Starting…' : 'Start chat from zones'}
+                  </button>
+                </div>
+              )}
             </div>
-            {zones.length > 0 && (
+          ) : (
+          <>
+          <div className="px-4 py-3 border-b border-ink-200 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[11px] font-semibold text-ink-500 uppercase tracking-wider">Zones</p>
+              <button
+                type="button"
+                onClick={addZone}
+                className="text-[11px] font-semibold text-accent hover:underline"
+              >
+                + Add zone
+              </button>
+            </div>
+            {zoneCatalog.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5">
+                {zoneCatalog.map((z) => (
+                  <button
+                    key={z.zone_no}
+                    type="button"
+                    title="Click to remove"
+                    onClick={() => removeZone(z.zone_no)}
+                    className="inline-flex items-center gap-1 rounded border border-ink-200 bg-ink-50 px-2 py-0.5 text-[10px] text-ink-700 hover:border-red-300 hover:text-red-700"
+                  >
+                    <span className="font-semibold">Z{z.zone_no}</span>
+                    <span className="truncate max-w-[9rem]">{z.description}</span>
+                  </button>
+                ))}
+              </div>
+            ) : zones.length > 0 ? (
               <p className="text-[11px] text-ink-500">Zones: {zones.join(' · ')}</p>
-            )}
+            ) : null}
           </div>
 
           <div className="flex-1 overflow-auto px-4 py-4 space-y-4">
@@ -764,10 +1244,36 @@ export default function App() {
               </button>
             </div>
           </div>
+          </>
+          )}
         </section>
 
         {/* Artifact */}
         <section className="flex-1 min-w-0 bg-ink-100/60 flex flex-col">
+          {(autoSyncing || compileNote || compatNote) && (
+            <div className="border-b border-ink-200">
+              {compatNote && (
+                <div className="px-4 py-2 text-[11px] bg-sky-50 text-sky-950 border-b border-sky-100 flex items-start justify-between gap-2">
+                  <span>{compatNote}</span>
+                  <button
+                    type="button"
+                    className="shrink-0 text-sky-700/70 hover:text-sky-950"
+                    onClick={() => setCompatNote('')}
+                    aria-label="Dismiss compat note"
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
+              {(autoSyncing || compileNote) && (
+                <div className={`px-4 py-2 text-[11px] ${
+                  compileNote ? 'bg-amber-50 text-amber-900' : 'bg-white text-ink-500'
+                }`}>
+                  {autoSyncing ? 'Auto-rendering preview…' : compileNote}
+                </div>
+              )}
+            </div>
+          )}
           {activeTab === 'preview' ? (
             <div className="flex-1 overflow-auto p-6 flex justify-center">
               <div className="w-full max-w-3xl bg-white border border-ink-200 shadow-sm min-h-[80vh]">
@@ -776,7 +1282,7 @@ export default function App() {
                 ) : (
                   <div className="min-h-[80vh] flex flex-col items-center justify-center text-ink-400 gap-2">
                     <FileText size={28} />
-                    <p className="text-sm">Preview appears after generate or sync</p>
+                    <p className="text-sm">Preview appears after start chat or edits</p>
                   </div>
                 )}
               </div>
@@ -790,7 +1296,7 @@ export default function App() {
                   disabled={loading}
                   className="h-8 px-3 rounded-md bg-ink-900 text-white text-xs font-semibold flex items-center gap-1.5 disabled:opacity-40"
                 >
-                  <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
+                  <RefreshCw size={12} className={loading || autoSyncing ? 'animate-spin' : ''} />
                   Sync & render
                 </button>
               </div>
