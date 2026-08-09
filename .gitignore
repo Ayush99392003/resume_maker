@@ -14,8 +14,10 @@ venv/
 # Durable chat sessions
 backend/data/
 
-# Local Tectonic binary (downloadable)
+# Local Tectonic binary & font configs (downloadable/generated)
 backend/bin/
+backend/etc/
+backend/fonts/
 
 # Build outputs & temporary files
 dist/
