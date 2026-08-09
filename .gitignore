@@ -29,9 +29,14 @@ build/
 _tmp_*
 backend/_tmp_*
 
-# IDEs
+# IDEs & Test Caches
 .vscode/
 .idea/
+.pytest_cache/
+.coverage
+coverage/
+*.sqlite
+*.db
 
 # Docker
 .dockerignore
