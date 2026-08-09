@@ -1,6 +1,6 @@
 # Work log — Resume Maker
 
-Chronological notes of what was built, broken, and fixed. Updated 2026-08-08.
+Chronological notes of what was built, broken, and fixed. Updated 2026-08-09 (EOD — continue tomorrow).
 
 ## Scope locked
 
@@ -115,24 +115,104 @@ Ensure `backend/bin/tectonic.exe` exists or Tectonic is on PATH.
 
 ---
 
-## Known open items
+## Known open items / continue tomorrow
 
-1. Make **classic**/`moderncv` compile on Windows (Fontconfig / fonts) or hide classic in UI until fixed
-2. Soft-fail **`POST /compile`** the same way as chat (still hard 500 on classic sessions when loading PDF)
-3. Optional: React Router for per-session URLs; parallel zone agents
-4. User should rotate any Groq key that appeared in chat logs
-5. Avoid committing `backend/data/` (profiles, sessions, tokens) — already gitignored
+1. **Re-test Overleaf paste in UI** after brace-fix soften (user must use **New chat** + fresh paste; old sessions may still hold broken `\myuline` remnant latex)
+2. Watch for any remaining Tectonic errors on other Overleaf templates (not just Harshibar) — expand softener as needed
+3. Make **classic**/`moderncv` compile on Windows or hide classic in UI
+4. Port **8000** orphan processes (`Errno 10048`) — kill PID then restart; common after aborted agent shells
+5. Optional: React Router for per-session URLs; parallel zone agents; drag-and-drop zone reorder
+6. Rotate any Groq key that appeared in older chat logs
+7. Avoid committing `backend/data/` (sessions, imports, logs) — gitignored
+8. **Future feature:** Compat Lab (measure LaTeX vs Tectonic/Python runtime → ratio → save → iterate → tool) — see [`FUTURE_WORKS.md`](FUTURE_WORKS.md)
 
 ---
 
-## Recent session snapshot (2026-08-08 ~17:55)
+## 2026-08-09 — Numbered zones + router + orchestrator
 
-From local backend terminal after a clean start:
+- Sessions store `header` / `footer` / `zones[]` / `zone_order` / `next_zone_no`
+- `latex_to_zones` converts built/bundled `.tex` → Zone 1..N JSON
+- Chat: top-level `chat_router` (`direct_reply` vs `orchestrator`) then fill/edit/add/remove/reorder/describe agents
+- APIs: `POST /setup/import`, `POST/DELETE .../zones`, `PATCH .../zone-order`
+- UI: Overleaf URL on new chat, zone chips (click to remove), + Add zone
 
-- `POST /sessions` 200 — new session created
-- Loaded session `2341f2dc-400f-4264-8153-a0c224f37cca` with **template=classic**
-- `POST /compile` → **500** Fontconfig / Tectonic failed
-- `POST /chat` first_fill with Groq profile key → zones updated → compile failed → **200** (soft-fail)
-- Backend later shut down cleanly (user Ctrl+C)
+---
 
-**Recommendation:** create a **new** session with template **`modern`** for PDF preview.
+## 2026-08-09 — Overleaf → Tectonic soften + debug logging (EOD)
+
+### Built today
+
+| Area | Notes |
+|------|--------|
+| Rich step/error logs | `*.step:` / `*.error:` across API, router, orchestrator, agent, compile, import |
+| Log file | `backend/data/logs/app.log`; `LOG_LEVEL=DEBUG` in `.env` for more detail |
+| Fontconfig (Windows) | `backend/fonts/fonts.conf` + env in `compiler.py` |
+| Soften pipeline | `backend/core/latex_soften.py` — disable crashy pkgs, FA → text, brace-safe `\myuline` |
+| Soften on import | `_doc_from_import` softens **before** `latex_to_zones`; returns `compat_notes` |
+| Soften on compile/put | `ensure_full_document` + `PUT .../latex` |
+| UI | Blue compat banner; editor gets softened latex after paste |
+| Sample render | `backend/data/imports/harshibar_render/` (`resume_compat.tex`, PDFs) |
+| Tests | `tests/test_latex_soften.py`, `tests/test_latex_to_zones.py` |
+
+### Errors seen today (log for tomorrow)
+
+#### A. Empty Tectonic log / heap-style fail (paste Overleaf)
+
+- **UI/log:** `Tectonic failed` with only `Running TeX...` then die; `project_dir=False`
+- **Cause:** packages like `fontawesome5` / `FiraMono` / `contour` crash this Windows Tectonic build
+- **Also:** stale backend without soften (old log lines looked like `compile: latex_chars=` not `compile.step:`)
+- **Mitigation:** auto-soften on paste/import/compile; restart backend after pulls
+
+#### B. `Too many }'s` at `resume.tex:42` (user-facing ~10:50)
+
+- **Exact message:**  
+  `error: resume.tex:42: Too many }'s`  
+  plus misleading tip about fontawesome crash
+- **Root cause:** soften regex for `\newcommand{\myuline}[1]{%...\contour{white}{...}}` stopped at the **first** `}` → left orphan `{\underline{...}}}` in preamble
+- **Fix (landed, backend restarted PID ~38160):** brace-balanced `_replace_newcommand_body`; crash tip only when there is **no** real TeX `error:`
+- **Tomorrow:** confirm in UI with **New chat → paste raw Harshibar/Overleaf `.tex`**; do not reuse session that already saved broken latex
+
+#### C. Port 8000 `Errno 10048`
+
+- Orphan `python` still LISTENING after agent/shell abort (e.g. PID 37856)
+- **Fix:** `netstat -ano | findstr :8000` → `Stop-Process -Id <pid> -Force` → start `main.py` again
+
+#### D. Soften leftover-FA regex bug (fixed same day)
+
+- Pattern `\fa[A-Za-z]+` also matched `\fancyhf` / `\familydefault` → broke document shell (`Missing \begin{document}`)
+- **Fix:** only strip `\fa` + **Capital** letter (`\faPhone`, etc.)
+
+#### E. Stale session / double-escape in ad-hoc API tests
+
+- PowerShell-escaped pastes produced `\\faPhone*` in latex; not a product bug
+- Prefer `backend/scripts/verify_soften_harshibar.py` and `verify_soften_api.py` for checks
+
+### Verified green (before EOD)
+
+- Unit: soften + zones tests pass
+- Script: softened Harshibar-like raw → PDF (`harshibar_softened.pdf`)
+- API: `POST /setup/import` with crashy packages → `compat_notes` + `pdf_base64`, `compile_error: null`
+
+### How to resume tomorrow
+
+```powershell
+# Backend (kill orphan first if 10048)
+netstat -ano | findstr :8000
+cd backend
+uv run --python .venv\Scripts\python.exe python main.py
+
+# Frontend
+cd frontend
+npm run dev
+```
+
+1. New chat → Template URL tab → paste full Overleaf `.tex` → Start chat  
+2. Expect blue banner (“Adjusted for Windows Tectonic…”) + PDF  
+3. If compile fails: copy exact `compile_error` + last lines from backend terminal / `backend/data/logs/app.log` into this file under a new incident
+
+### Key files to touch next
+
+- `backend/core/latex_soften.py` — more packages / templates as errors appear  
+- `backend/main.py` — `_tectonic_crash_tip`, import/compile responses  
+- `frontend/src/App.jsx` — paste / compat banner  
+- `logs_work.md` — append new errors here
