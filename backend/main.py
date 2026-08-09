@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import traceback
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,6 +24,20 @@ try:
     from core.zones import zone_engine
     from core.logging_setup import get_logger, setup_logging
     from core.auth_store import auth_store
+    from core.latex_to_zones import latex_to_zones
+    from core.overleaf_import import (
+        import_overleaf_url,
+        OverleafImportError,
+        validate_overleaf_url,
+        ImportResult,
+    )
+    from core.zone_document import (
+        ZoneDocument,
+        document_from_session,
+        sync_session_from_document,
+        ensure_full_document,
+    )
+    from core.latex_soften import soften_latex_for_tectonic
     from core import config
     from llm_router import llm_router, SUPPORTED_PROVIDERS
 except ImportError:
@@ -38,11 +52,47 @@ except ImportError:
     from .core.zones import zone_engine
     from .core.logging_setup import get_logger, setup_logging
     from .core.auth_store import auth_store
+    from .core.latex_to_zones import latex_to_zones
+    from .core.overleaf_import import (
+        import_overleaf_url,
+        OverleafImportError,
+        validate_overleaf_url,
+        ImportResult,
+    )
+    from .core.zone_document import (
+        ZoneDocument,
+        document_from_session,
+        sync_session_from_document,
+        ensure_full_document,
+    )
+    from .core.latex_soften import soften_latex_for_tectonic
     from .core import config
     from .llm_router import llm_router, SUPPORTED_PROVIDERS
 
 setup_logging()
 log = get_logger("api")
+log.info(
+    "api boot environment=%s log_level=%s",
+    getattr(config, "ENVIRONMENT", "development"),
+    getattr(config, "LOG_LEVEL", "INFO"),
+)
+
+# Ensure Windows Fontconfig is ready before any compile requests
+try:
+    from core.compiler import apply_fontconfig_env, ensure_fontconfig_files
+
+    conf = ensure_fontconfig_files()
+    apply_fontconfig_env()
+    log.info("fontconfig: ready file=%s", conf)
+except Exception as _fc_err:  # pragma: no cover
+    try:
+        from .core.compiler import apply_fontconfig_env, ensure_fontconfig_files
+
+        conf = ensure_fontconfig_files()
+        apply_fontconfig_env()
+        log.info("fontconfig: ready file=%s", conf)
+    except Exception as e:
+        log.warning("fontconfig: setup failed - %s", e)
 
 
 def _mask_key(key: Optional[str]) -> str:
@@ -96,14 +146,21 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
-    log.error(
-        "Unhandled %s on %s %s: %s\n%s",
+    log.exception(
+        "Unhandled %s on %s %s: %s",
         type(exc).__name__,
         request.method,
         request.url.path,
         exc,
-        traceback.format_exc(),
     )
+    try:
+        from core.logging_setup import debug_exception
+    except ImportError:
+        from .core.logging_setup import debug_exception
+    try:
+        debug_exception(exc, logger=log)
+    except Exception:
+        log.debug("rich traceback unavailable\n%s", traceback.format_exc())
     return JSONResponse(
         status_code=500,
         content={"detail": f"{type(exc).__name__}: {exc}"},
@@ -150,6 +207,8 @@ class ScoreRequest(BaseModel):
 
 class CompileRequest(BaseModel):
     latex_code: str
+    project_dir: Optional[str] = None
+    session_id: Optional[str] = None
 
 
 class CreateSessionRequest(BaseModel):
@@ -157,6 +216,36 @@ class CreateSessionRequest(BaseModel):
     title: Optional[str] = None
     provider: Optional[str] = None
     model: Optional[str] = None
+    source_url: Optional[str] = None
+    latex: Optional[str] = None
+    # Optional zone filter (zone-selection path)
+    included_zone_nos: Optional[List[int]] = None
+    zone_order: Optional[List[int]] = None
+    custom_zones: Optional[List[str]] = None
+
+
+class SetupImportRequest(BaseModel):
+    url: Optional[str] = None
+    latex: Optional[str] = None
+    template_name: Optional[str] = None
+
+
+class SessionSetupRequest(BaseModel):
+    included_zone_nos: Optional[List[int]] = None
+    zone_order: Optional[List[int]] = None
+    source_url: Optional[str] = None
+    latex: Optional[str] = None
+
+
+class AddZoneRequest(BaseModel):
+    description: str = "Custom section"
+    after_zone_no: Optional[int] = None
+    at_start: bool = False
+    latex_inner: Optional[str] = None
+
+
+class ZoneOrderRequest(BaseModel):
+    zone_order: List[int]
 
 
 class ChatRequest(BaseModel):
@@ -256,27 +345,60 @@ def compile_with_retry(
     provider: Optional[str] = None,
     model: Optional[str] = None,
     api_key: Optional[str] = None,
+    project_dir: Optional[str] = None,
 ) -> tuple:
     """Compile LaTeX; on failure ask the agent to fix. Returns (pdf_bytes, latex)."""
-    current_latex = latex_code
+    current_latex = ensure_full_document(latex_code or "")
     last_error = ""
+    log.info(
+        "compile_retry.step: start attempts=%s chars=%s project_dir=%s",
+        max_retries + 1,
+        len(current_latex),
+        bool(project_dir),
+    )
 
     for attempt in range(max_retries + 1):
         try:
-            return compiler.compile(current_latex), current_latex
+            pdf = compiler.compile(current_latex, project_dir=project_dir)
+            log.info(
+                "compile_retry.step: ok attempt=%s pdf_bytes=%s",
+                attempt,
+                len(pdf),
+            )
+            return (pdf, current_latex)
         except CompilationError as e:
+            log.error(
+                "compile_retry.error: attempt=%s/%s - %s\n%s",
+                attempt,
+                max_retries,
+                e,
+                (e.logs or "")[-800:],
+            )
             if attempt == max_retries:
                 raise e
             last_error = e.logs
-            fix_update = ai_agent.fix_latex_error(
-                current_latex,
-                last_error,
-                provider=provider,
-                model=model,
-                api_key=api_key,
-            )
-            current_latex = fix_update.latex_code
+            log.info("compile_retry.step: asking agent to fix latex …")
+            try:
+                fix_update = ai_agent.fix_latex_error(
+                    current_latex,
+                    last_error,
+                    provider=provider,
+                    model=model,
+                    api_key=api_key,
+                )
+                current_latex = fix_update.latex_code
+                log.info(
+                    "compile_retry.step: fixer returned chars=%s summary=%s",
+                    len(current_latex),
+                    (fix_update.summary_of_changes or "")[:120],
+                )
+            except Exception as fix_err:
+                log.exception(
+                    "compile_retry.error: fixer failed - %s", fix_err
+                )
+                raise e
 
+    log.error("compile_retry.error: max retries exceeded")
     raise Exception("Max retries exceeded in compilation loop.")
 
 
@@ -404,20 +526,59 @@ async def change_password(
 
 @app.post("/compile")
 async def compile_latex_direct(req: CompileRequest):
-    log.info("compile: latex_chars=%s", len(req.latex_code or ""))
+    log.info(
+        "compile.step: request session=%s raw_chars=%s",
+        req.session_id,
+        len(req.latex_code or ""),
+    )
+    latex = ensure_full_document(req.latex_code or "")
+    project_dir = req.project_dir
+    if not project_dir and req.session_id:
+        sess = session_store.get(req.session_id)
+        if sess:
+            project_dir = getattr(sess, "project_dir", None)
+    log.info(
+        "compile.step: soften/shell ok chars=%s has_begin=%s project_dir=%s",
+        len(latex),
+        "\\begin{document}" in latex,
+        bool(project_dir),
+    )
     try:
-        pdf_bytes = compiler.compile(req.latex_code)
-        log.info("compile: ok pdf_bytes=%s", len(pdf_bytes))
-        return {"pdf_base64": _pdf_b64(pdf_bytes)}
+        pdf_bytes = compiler.compile(latex, project_dir=project_dir)
+        log.info("compile.step: ok pdf_bytes=%s", len(pdf_bytes))
+        return {
+            "pdf_base64": _pdf_b64(pdf_bytes),
+            "latex_code": latex,
+            "compile_error": None,
+        }
     except CompilationError as e:
-        log.error("compile: tectonic failed - %s\n%s", e.message, e.logs[:2000])
-        raise HTTPException(
-            status_code=500,
-            detail=f"Tectonic failed: {e.message}. {e.logs[:500]}",
+        log.error(
+            "compile.error: tectonic failed - %s\n%s",
+            e.message,
+            (e.logs or "")[:2000],
         )
+        tip = ""
+        if "Fontconfig" in (e.logs or ""):
+            tip = (
+                " Tip: Fontconfig was configured under backend/fonts — "
+                "restart the backend. If this is a font-heavy template, "
+                "try a simpler Overleaf gallery CV or the bundled modern template."
+            )
+        tip += _tectonic_crash_tip(e.logs or "")
+        return {
+            "pdf_base64": None,
+            "latex_code": latex,
+            "compile_error": (
+                f"Tectonic failed: {e.message}. {(e.logs or '')[:500]}{tip}"
+            ),
+        }
     except Exception as e:
-        log.exception("compile: unexpected error")
-        raise HTTPException(status_code=500, detail=str(e))
+        log.exception("compile.error: unexpected - %s", e)
+        return {
+            "pdf_base64": None,
+            "latex_code": latex,
+            "compile_error": str(e),
+        }
 
 
 @app.post("/generate")
@@ -555,6 +716,7 @@ async def apply_edit(req: ApplyRequest):
     except HTTPException:
         raise
     except Exception as e:
+        log.exception("apply.error: unexpected - %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -598,11 +760,36 @@ async def validate_latex(req: dict):
 async def get_sections(req: dict):
     try:
         latex = req.get("latex_code", "")
+        session_id = req.get("session_id")
         zones = zone_engine.list_zones(latex)
         sections = sectional_parser.extract_sections(latex)
+        catalog = []
+        if session_id:
+            session = session_store.get(session_id)
+            if session and session.zones:
+                order = session.zone_order or [
+                    z.get("zone_no") for z in session.zones
+                ]
+                zmap = {z.get("zone_no"): z for z in session.zones}
+                for n in order:
+                    z = zmap.get(n)
+                    if z:
+                        catalog.append(
+                            {
+                                "zone_no": z.get("zone_no"),
+                                "description": z.get("description"),
+                                "kind": z.get("kind"),
+                            }
+                        )
+        if not catalog and zones:
+            catalog = [
+                {"zone_no": z, "description": str(z), "kind": "legacy"}
+                for z in zones
+            ]
         return {
             "sections": list(sections.keys()),
             "zones": zones,
+            "catalog": catalog,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -644,25 +831,404 @@ async def squeeze_resume(
 # ---------- Sessions + Chat ----------
 
 
+def _tectonic_crash_tip(logs: str) -> str:
+    """Tip only for silent/heap crashes — never when TeX reported a real error."""
+    body = (logs or "").strip()
+    lower = body.lower()
+    # Real diagnostics: keep the tip off so we don't mislead.
+    if any(
+        tok in lower
+        for tok in (
+            "error:",
+            "too many",
+            "undefined control sequence",
+            "missing \\begin{document}",
+            "emergency stop",
+            "file not found",
+        )
+    ):
+        return ""
+    # Heap crash pattern: almost empty log after "Running TeX"
+    if (not body) or (
+        "running tex" in lower and len(body) < 280 and "error" not in lower
+    ):
+        return (
+            " Likely an incompatible Overleaf package (fontawesome / FiraMono / "
+            "contour / fontspec) crashed Tectonic. Soften should strip these on "
+            "paste — start a New chat and paste again, or use a public gallery "
+            "zip URL so assets resolve."
+        )
+    return ""
+
+def _doc_from_import(
+    *,
+    url: Optional[str] = None,
+    latex: Optional[str] = None,
+    template_name: Optional[str] = None,
+) -> Tuple[ZoneDocument, Optional[str], List[str], List[str]]:
+    """
+    Returns (document, project_dir, warnings, compat_notes).
+    project_dir is set when an Overleaf/GitHub zip with assets was downloaded.
+    Softens Overleaf packages before zoning so Windows Tectonic can compile.
+    """
+    log.info(
+        "import.step: start url=%s latex_chars=%s template=%s",
+        bool(url),
+        len(latex or ""),
+        template_name,
+    )
+    source_url = url
+    project_dir: Optional[str] = None
+    warnings: List[str] = []
+    compat_notes: List[str] = []
+    if url and not latex:
+        try:
+            log.info("import.step: validate+download overleaf url")
+            validate_overleaf_url(url)
+            result: ImportResult = import_overleaf_url(url)
+            latex = result.latex
+            source_url = result.source_url
+            project_dir = result.project_dir
+            warnings = list(result.warnings)
+            if result.main_tex:
+                warnings.append(f"Main file: {result.main_tex}")
+            if result.files:
+                warnings.append(f"Imported {len(result.files)} files")
+            log.info(
+                "import.step: download ok latex_chars=%s project_dir=%s",
+                len(latex or ""),
+                bool(project_dir),
+            )
+        except OverleafImportError as e:
+            log.error("import.error: overleaf failed - %s", e)
+            raise HTTPException(status_code=400, detail=str(e))
+    if not latex and template_name:
+        log.info("import.step: load bundled template=%s", template_name)
+        latex = template_manager.get_template(template_name)
+    if not latex:
+        log.error("import.error: no latex/url/template provided")
+        raise HTTPException(
+            status_code=400,
+            detail="Provide overleaf url, latex, or template_name",
+        )
+    latex, compat_notes = soften_latex_for_tectonic(latex)
+    if compat_notes:
+        log.info("import.step: softened changes=%s", compat_notes)
+        warnings.append(
+            "Adjusted for Windows Tectonic: " + "; ".join(compat_notes)
+        )
+    try:
+        doc = latex_to_zones(latex, source_url=source_url)
+        log.info(
+            "import.step: zones ready count=%s order=%s",
+            len(doc.zones),
+            doc.zone_order,
+        )
+    except Exception as e:
+        log.exception("import.error: latex_to_zones failed - %s", e)
+        raise HTTPException(
+            status_code=400, detail=f"Failed to parse LaTeX into zones: {e}"
+        )
+    return doc, project_dir, warnings, compat_notes
+
+
+@app.post("/setup/import")
+async def setup_import(req: SetupImportRequest):
+    """Convert Overleaf URL / pasted LaTeX / bundled template → zones JSON."""
+    log.info(
+        "setup.import: url=%s latex=%s template=%s",
+        bool(req.url),
+        bool(req.latex),
+        req.template_name,
+    )
+    doc, project_dir, warnings, compat_notes = _doc_from_import(
+        url=req.url,
+        latex=req.latex,
+        template_name=req.template_name or (
+            "modern" if not req.url and not req.latex else None
+        ),
+    )
+    # Soft compile check so UI knows if format can render
+    compile_error = None
+    pdf_b64 = None
+    assembled = ensure_full_document(doc.assemble())
+    log.info(
+        "setup.import: assemble ok chars=%s zones=%s compiling…",
+        len(assembled),
+        doc.zone_order,
+    )
+    try:
+        pdf_bytes = compiler.compile(assembled, project_dir=project_dir)
+        pdf_b64 = _pdf_b64(pdf_bytes)
+        log.info("setup.import: compile ok pdf_bytes=%s", len(pdf_bytes))
+    except CompilationError as e:
+        tip = _tectonic_crash_tip(e.logs or "")
+        compile_error = f"Tectonic failed: {e.message}. {(e.logs or '')[:500]}{tip}"
+        log.exception("setup.import: compile failed - %s", e)
+        warnings.append(
+            "Template imported but initial compile failed — "
+            "chat can still edit; try Sync after setup."
+        )
+    except Exception as e:
+        compile_error = str(e)
+        log.exception("setup.import: compile failed - %s", e)
+        warnings.append(
+            "Template imported but initial compile failed — "
+            "chat can still edit; try Sync after setup."
+        )
+    return {
+        "document": doc.model_dump(),
+        "catalog": doc.catalog(),
+        "latex_code": assembled,
+        "project_dir": project_dir,
+        "warnings": warnings,
+        "compat_notes": compat_notes,
+        "pdf_base64": pdf_b64,
+        "compile_error": compile_error,
+    }
+
+
 @app.post("/sessions")
 async def create_session(req: CreateSessionRequest):
+    """
+    Create a chat base from either:
+    - template URL / pasted latex (`source_url` or `latex`), or
+    - bundled template + optional zone selection (`template_name`,
+      `included_zone_nos` / `zone_order` / `custom_zones`).
+    """
     provider = req.provider or config.LLM_PROVIDER
     model = req.model or config.MODEL_NAME
-    template = template_manager.get_template(req.template_name)
-    if not template:
-        raise HTTPException(status_code=404, detail="Template not found")
+
+    has_url = bool((req.source_url or "").strip())
+    has_latex = bool((req.latex or "").strip())
+    project_dir: Optional[str] = None
+    log.info(
+        "session.create: url=%s latex=%s template=%s included=%s",
+        has_url,
+        has_latex,
+        req.template_name,
+        req.included_zone_nos,
+    )
+    compat_notes: List[str] = []
+    if has_url or has_latex:
+        doc, project_dir, _warnings, compat_notes = _doc_from_import(
+            url=req.source_url, latex=req.latex
+        )
+    else:
+        template = template_manager.get_template(req.template_name)
+        if not template:
+            log.error("session.create: template not found %s", req.template_name)
+            raise HTTPException(status_code=404, detail="Template not found")
+        soft, compat_notes = soften_latex_for_tectonic(template)
+        doc = latex_to_zones(soft)
+        log.info("session.create: bundled template zones=%s", doc.zone_order)
+
+    if req.source_url and not doc.source_url:
+        doc.source_url = req.source_url
+
+    if req.included_zone_nos is not None:
+        keep = set(req.included_zone_nos)
+        for n in list(doc.zone_order):
+            if n not in keep:
+                try:
+                    doc.remove_zone(n)
+                except KeyError:
+                    pass
+
+    if req.zone_order:
+        remaining = [n for n in req.zone_order if n in doc.zone_map()]
+        extras = [n for n in doc.zone_order if n not in remaining]
+        doc.zone_order = remaining + extras
+
+    for desc in req.custom_zones or []:
+        name = (desc or "").strip()
+        if not name:
+            continue
+        doc.add_zone(
+            description=name,
+            latex_inner=f"\\section*{{{name}}}\n% TODO",
+            kind="custom",
+        )
+
+    assembled = ensure_full_document(doc.assemble())
+    # Keep session latex aligned with softened/shell-fixed source
+    if assembled != doc.assemble():
+        try:
+            doc = latex_to_zones(assembled, source_url=doc.source_url)
+        except Exception:
+            pass
     session = session_store.create(
         template_name=req.template_name,
         title=req.title or "New resume chat",
-        latex_code=template,
+        latex_code=assembled,
         provider=provider,
         model=model,
+        header=doc.header,
+        footer=doc.footer,
+        zones=[z.model_dump() for z in doc.zones],
+        zone_order=list(doc.zone_order),
+        next_zone_no=doc.next_zone_no,
+        source_url=doc.source_url,
+        project_dir=project_dir,
+        setup_complete=True,
         welcome=(
-            "Welcome! Paste your bio or career summary to build a LaTeX resume. "
-            "You can switch models anytime - chat history is kept."
+            "Base ready. Paste your biodata to fill zones, or ask to "
+            "add/remove/reorder/edit a zone."
         ),
     )
+    log.info(
+        "session.create: ok id=%s zones=%s project_dir=%s compat=%s",
+        session.session_id,
+        session.zone_order,
+        bool(project_dir),
+        compat_notes,
+    )
+    payload = session.model_dump()
+    payload["compat_notes"] = compat_notes
+    if compat_notes:
+        payload["compat_banner"] = (
+            "Adjusted for Windows Tectonic: " + "; ".join(compat_notes)
+        )
+    return payload
+
+
+@app.post("/sessions/{session_id}/setup")
+async def confirm_session_setup(session_id: str, req: SessionSetupRequest):
+    session = session_store.get(session_id)
+    if not session:
+        log.error("session.setup: not found id=%s", session_id)
+        raise HTTPException(status_code=404, detail="Session not found")
+    log.info(
+        "session.setup: id=%s included=%s order=%s",
+        session_id,
+        req.included_zone_nos,
+        req.zone_order,
+    )
+
+    if req.latex or req.source_url:
+        doc, project_dir, _warnings, _compat = _doc_from_import(
+            url=req.source_url, latex=req.latex
+        )
+        if project_dir:
+            session.project_dir = project_dir
+    else:
+        doc = document_from_session(session)
+        if doc is None:
+            template = template_manager.get_template(session.template_name)
+            doc = latex_to_zones(template or session.latex_code)
+
+    if req.included_zone_nos is not None:
+        keep = set(req.included_zone_nos)
+        for n in list(doc.zone_order):
+            if n not in keep:
+                try:
+                    doc.remove_zone(n)
+                except KeyError:
+                    pass
+    if req.zone_order:
+        # Allow subset order of remaining zones
+        remaining = [n for n in req.zone_order if n in doc.zone_map()]
+        extras = [n for n in doc.zone_order if n not in remaining]
+        doc.zone_order = remaining + extras
+
+    sync_session_from_document(session, doc)
+    session_store.save(session)
     return session.model_dump()
+
+
+@app.post("/sessions/{session_id}/zones")
+async def add_session_zone(session_id: str, req: AddZoneRequest):
+    session = session_store.get(session_id)
+    if not session:
+        log.error("zones.add: session not found id=%s", session_id)
+        raise HTTPException(status_code=404, detail="Session not found")
+    log.info(
+        "zones.add.step: id=%s desc=%s after=%s at_start=%s",
+        session_id,
+        req.description,
+        req.after_zone_no,
+        req.at_start,
+    )
+    doc = document_from_session(session) or latex_to_zones(
+        session.latex_code
+        or template_manager.get_template(session.template_name)
+        or ""
+    )
+    inner = req.latex_inner or (
+        f"\\section*{{{req.description}}}\n% TODO"
+    )
+    rec = doc.add_zone(
+        description=req.description,
+        latex_inner=inner,
+        after_zone_no=req.after_zone_no,
+        at_start=req.at_start,
+    )
+    sync_session_from_document(session, doc)
+    session_store.save(session)
+    log.info("zones.add.step: ok zone_no=%s order=%s", rec.zone_no, doc.zone_order)
+    return {
+        "zone": rec.model_dump(),
+        "catalog": doc.catalog(),
+        "latex_code": session.latex_code,
+        "session": session.model_dump(),
+    }
+
+
+@app.delete("/sessions/{session_id}/zones/{zone_no}")
+async def remove_session_zone(session_id: str, zone_no: int):
+    session = session_store.get(session_id)
+    if not session:
+        log.error("zones.remove: session not found id=%s", session_id)
+        raise HTTPException(status_code=404, detail="Session not found")
+    doc = document_from_session(session)
+    if doc is None:
+        log.error("zones.remove: no zone document id=%s", session_id)
+        raise HTTPException(status_code=400, detail="Session has no zone document")
+    try:
+        removed = doc.remove_zone(zone_no)
+    except KeyError:
+        log.error("zones.remove: zone %s not found id=%s", zone_no, session_id)
+        raise HTTPException(status_code=404, detail=f"Zone {zone_no} not found")
+    sync_session_from_document(session, doc)
+    session_store.save(session)
+    log.info(
+        "zones.remove.step: ok zone=%s remaining=%s",
+        zone_no,
+        doc.zone_order,
+    )
+    return {
+        "removed": removed.model_dump(),
+        "catalog": doc.catalog(),
+        "latex_code": session.latex_code,
+        "session": session.model_dump(),
+    }
+
+
+@app.patch("/sessions/{session_id}/zone-order")
+async def patch_zone_order(session_id: str, req: ZoneOrderRequest):
+    session = session_store.get(session_id)
+    if not session:
+        log.error("zones.order: session not found id=%s", session_id)
+        raise HTTPException(status_code=404, detail="Session not found")
+    doc = document_from_session(session)
+    if doc is None:
+        log.error("zones.order: no zone document id=%s", session_id)
+        raise HTTPException(status_code=400, detail="Session has no zone document")
+    log.info("zones.order.step: id=%s → %s", session_id, req.zone_order)
+    try:
+        doc.reorder(req.zone_order)
+    except ValueError as e:
+        log.error("zones.order.error: %s", e)
+        raise HTTPException(status_code=400, detail=str(e))
+    sync_session_from_document(session, doc)
+    session_store.save(session)
+    log.info("zones.order.step: ok order=%s", doc.zone_order)
+    return {
+        "zone_order": doc.zone_order,
+        "catalog": doc.catalog(),
+        "latex_code": session.latex_code,
+        "session": session.model_dump(),
+    }
 
 
 @app.get("/sessions")
@@ -713,8 +1279,39 @@ async def put_session_latex(session_id: str, req: LatexPutRequest):
     session = session_store.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    session = session_store.set_latex(session, req.latex_code)
-    return {"session_id": session.session_id, "updated_at": session.updated_at}
+    raw = req.latex_code or ""
+    soft, compat_notes = soften_latex_for_tectonic(raw)
+    latex = ensure_full_document(soft)
+    log.info(
+        "session.latex.step: id=%s chars=%s has_doc=%s compat=%s",
+        session_id,
+        len(latex),
+        "\\begin{document}" in latex,
+        compat_notes,
+    )
+    # Re-sync zone JSON when a full document is saved from the editor
+    if "\\begin{document}" in latex:
+        try:
+            doc = latex_to_zones(latex, source_url=session.source_url)
+            sync_session_from_document(session, doc)
+            session_store.save(session)
+            log.info(
+                "session.latex.step: re-zoned order=%s", doc.zone_order
+            )
+        except Exception as e:
+            log.exception(
+                "session.latex.error: re-zone failed, saving latex only - %s",
+                e,
+            )
+            session = session_store.set_latex(session, latex)
+    else:
+        session = session_store.set_latex(session, latex)
+    return {
+        "session_id": session.session_id,
+        "updated_at": session.updated_at,
+        "latex_code": session.latex_code,
+        "compat_notes": compat_notes,
+    }
 
 
 @app.post("/chat")
@@ -756,21 +1353,36 @@ async def chat(
         log.error("chat: provider config error - %s", detail)
         raise HTTPException(status_code=400, detail=detail)
 
-    template = template_manager.get_template(session.template_name)
-    if not template:
-        raise HTTPException(status_code=404, detail="Template not found")
+    template = template_manager.get_template(session.template_name) or ""
 
-    # Count prior user messages to detect first fill
+    # Ensure numbered zone document exists (migrate old sessions on the fly)
+    doc = document_from_session(session)
+    if doc is None or not doc.zones:
+        log.info("chat.step: migrate session latex → zones")
+        try:
+            doc = latex_to_zones(
+                session.latex_code or template,
+                source_url=session.source_url,
+            )
+            sync_session_from_document(session, doc)
+            session_store.save(session)
+        except Exception as e:
+            log.exception("chat.error: zone migrate failed - %s", e)
+            raise HTTPException(
+                status_code=500, detail=f"Zone migrate failed: {e}"
+            )
+
     user_turns = sum(1 for m in session.messages if m.role == "user")
-    is_first_fill = user_turns == 0 or not session.latex_code.strip() or (
-        session.latex_code.strip() == template.strip()
+    placeholders = any(
+        "[[" in (z.get("latex") or "") for z in (session.zones or [])
     )
+    is_first_fill = user_turns == 0 or placeholders
     log.info(
-        "chat: first_fill=%s user_turns=%s latex_chars=%s zones=%s",
+        "chat.step: first_fill=%s user_turns=%s latex_chars=%s zones=%s",
         is_first_fill,
         user_turns,
         len(session.latex_code or ""),
-        zone_engine.list_zones(session.latex_code or template),
+        session.zone_order,
     )
 
     session_store.append_message(
@@ -785,25 +1397,27 @@ async def chat(
     history = [m.model_dump() for m in session.messages[:-1]]
 
     try:
+        log.info("chat.step: run_chat_turn …")
         result = ai_agent.run_chat_turn(
             user_message=req.message,
-            latex_code=session.latex_code if not is_first_fill else "",
+            latex_code=session.latex_code,
             template_latex=template,
             history=history,
             provider=provider,
             model=model,
             api_key=api_key,
             is_first_fill=is_first_fill,
+            session=session,
         )
         log.info(
-            "chat: agent ok zones_changed=%s proposals=%s reply_chars=%s",
+            "chat.step: agent done route=%s zones_changed=%s reply_chars=%s",
+            result.route,
             result.zones_changed,
-            bool(result.proposals),
             len(result.reply or ""),
         )
     except Exception as e:
         err = str(e)
-        log.exception("chat: agent failed - %s", e)
+        log.exception("chat.error: agent failed - %s", e)
         if "invalid_api_key" in err.lower() or "invalid api key" in err.lower() or "401" in err:
             raise HTTPException(
                 status_code=401,
@@ -816,26 +1430,36 @@ async def chat(
 
     pdf_b64 = None
     final_latex = result.latex_code
-    if result.zones_changed or is_first_fill:
+    if result.zone_document:
+        try:
+            doc = ZoneDocument(**result.zone_document)
+            sync_session_from_document(session, doc)
+            final_latex = session.latex_code
+            log.info("chat.step: synced zone document zones=%s", session.zone_order)
+        except Exception as e:
+            log.exception("chat.error: sync zone document failed - %s", e)
+
+    if result.zones_changed or (is_first_fill and result.route == "orchestrator"):
+        log.info("chat.step: compile after zone changes …")
         try:
             pdf_bytes, final_latex = compile_with_retry(
-                result.latex_code,
+                final_latex,
                 provider=provider,
                 model=model,
                 api_key=api_key,
+                project_dir=getattr(session, "project_dir", None),
             )
             pdf_b64 = _pdf_b64(pdf_bytes)
-            log.info("chat: compile ok pdf_bytes=%s", len(pdf_bytes))
+            log.info("chat.step: compile ok pdf_bytes=%s", len(pdf_bytes))
+            # Keep assembled latex if compile fixer rewrote full doc
+            session.latex_code = final_latex
         except Exception as e:
-            log.error("chat: compile failed - %s", e)
-            # Still save latex; report compile issue in reply
-            result.reply = (
-                f"{result.reply}\n\n(Compile issue: {e})"
-            )
+            log.exception("chat.error: compile failed - %s", e)
+            result.reply = f"{result.reply}\n\n(Compile issue: {e})"
 
-    session.latex_code = final_latex
     session.active_provider = result.provider
     session.active_model = result.model
+    session_store.save(session)
 
     proposal_payload = None
     if result.proposals:
@@ -859,6 +1483,7 @@ async def chat(
     meta: Dict[str, Any] = {
         "zones_changed": result.zones_changed,
         "tool_trace": result.tool_trace,
+        "route": result.route,
     }
     if proposal_payload:
         meta["proposals"] = proposal_payload
@@ -876,13 +1501,22 @@ async def chat(
     return {
         "session": session.model_dump(),
         "reply": result.reply,
-        "latex_code": final_latex,
+        "latex_code": session.latex_code,
         "pdf_base64": pdf_b64,
         "zones_changed": result.zones_changed,
         "proposals": proposal_payload,
         "provider": result.provider,
         "model": result.model,
         "tool_trace": result.tool_trace,
+        "route": result.route,
+        "catalog": [
+            {
+                "zone_no": z.get("zone_no"),
+                "description": z.get("description"),
+                "kind": z.get("kind"),
+            }
+            for z in (session.zones or [])
+        ],
     }
 
 
