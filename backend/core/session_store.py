@@ -30,6 +30,15 @@ class ChatSession(BaseModel):
     title: str = "New resume chat"
     template_name: str = "modern"
     latex_code: str = ""
+    # Numbered zone document (orchestrator source of truth)
+    header: str = ""
+    footer: str = ""
+    zones: List[Dict[str, Any]] = Field(default_factory=list)
+    zone_order: List[int] = Field(default_factory=list)
+    next_zone_no: int = 1
+    source_url: Optional[str] = None
+    project_dir: Optional[str] = None
+    setup_complete: bool = False
     created_at: str = Field(default_factory=_utcnow)
     updated_at: str = Field(default_factory=_utcnow)
     active_provider: str = "groq"
@@ -58,6 +67,14 @@ class SessionStore:
         provider: str = "groq",
         model: str = "llama-3.3-70b-versatile",
         welcome: Optional[str] = None,
+        header: str = "",
+        footer: str = "",
+        zones: Optional[List[Dict[str, Any]]] = None,
+        zone_order: Optional[List[int]] = None,
+        next_zone_no: int = 1,
+        source_url: Optional[str] = None,
+        project_dir: Optional[str] = None,
+        setup_complete: bool = False,
     ) -> ChatSession:
         session = ChatSession(
             title=title,
@@ -65,6 +82,14 @@ class SessionStore:
             latex_code=latex_code,
             active_provider=provider,
             active_model=model,
+            header=header,
+            footer=footer,
+            zones=zones or [],
+            zone_order=zone_order or [],
+            next_zone_no=next_zone_no,
+            source_url=source_url,
+            project_dir=project_dir,
+            setup_complete=setup_complete,
         )
         if welcome:
             session.messages.append(
@@ -112,6 +137,8 @@ class SessionStore:
                         "active_provider": data.get("active_provider"),
                         "active_model": data.get("active_model"),
                         "template_name": data.get("template_name"),
+                        "setup_complete": data.get("setup_complete", False),
+                        "zone_count": len(data.get("zones") or []),
                     }
                 )
             except (json.JSONDecodeError, OSError):

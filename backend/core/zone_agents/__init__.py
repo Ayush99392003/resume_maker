@@ -9,9 +9,13 @@ from typing import Any, Dict, List, Optional, Tuple
 try:
     from llm_router import ChatMessage, llm_router
     from core.zones import zone_engine
+    from core.logging_setup import get_logger
 except ImportError:
     from ..llm_router import ChatMessage, llm_router  # type: ignore
     from ..zones import zone_engine
+    from ..logging_setup import get_logger
+
+log = get_logger("zone_agents")
 
 
 def _extract_json(text: str) -> dict:
@@ -229,6 +233,7 @@ class ZoneAgentRouter:
     ) -> Dict[str, Any]:
         available = zone_engine.list_zones(latex_code)
         if not available:
+            log.error("zone_agent.error: no ZONE markers in template")
             raise ValueError("No ZONE markers found in template")
 
         targets = self._classify(
@@ -238,6 +243,12 @@ class ZoneAgentRouter:
             provider=provider,
             model=model,
             api_key=api_key,
+        )
+        log.info(
+            "zone_agent.step: targets=%s initial=%s available=%s",
+            targets,
+            is_initial,
+            available,
         )
         digest = zone_engine.zone_digest(latex_code)
         current_map = zone_engine.extract_zones(latex_code)
@@ -277,6 +288,9 @@ class ZoneAgentRouter:
                     }
                 )
             except Exception as e:
+                log.exception(
+                    "zone_agent.error: %s failed - %s", zone_id, e
+                )
                 trace.append(
                     {
                         "tool": f"zone_agent.{zone_id}",
@@ -286,6 +300,9 @@ class ZoneAgentRouter:
                 )
 
         if not updates:
+            log.error(
+                "zone_agent.error: no updates targets=%s", targets
+            )
             raise ValueError("No zone agents produced updates")
 
         new_latex = zone_engine.replace_zones(latex_code, updates)

@@ -10,4 +10,5 @@ numpy==1.26.2
 requests==2.31.0
 aiofiles==23.2.1
 httpx>=0.25.0
+rich>=13.7.0
 # Tectonic is installed via Dockerfile system packages

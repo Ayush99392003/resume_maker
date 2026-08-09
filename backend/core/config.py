@@ -11,6 +11,12 @@ dotenv.load_dotenv()
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "")
 
+# Logging / debugging (Rich console + optional file)
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").strip().upper()
+LOG_FILE = os.getenv("LOG_FILE", "")  # default set in logging_setup for dev
+LOG_RICH = os.getenv("LOG_RICH", "1").strip()
+LOG_LOCALS = os.getenv("LOG_LOCALS", "0").strip()
+
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq").strip().lower()
 MODEL_NAME = os.getenv("MODEL_NAME", "llama-3.3-70b-versatile").strip()
 
