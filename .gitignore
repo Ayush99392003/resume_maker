@@ -17,13 +17,15 @@ backend/data/
 # Local Tectonic binary (downloadable)
 backend/bin/
 
-# Build outputs
+# Build outputs & temporary files
 dist/
 build/
 *.pdf
 *.log
 *.aux
 *.out
+_tmp_*
+backend/_tmp_*
 
 # IDEs
 .vscode/
