@@ -388,8 +388,10 @@ def compile_with_retry(
                 )
                 current_latex = fix_update.latex_code
                 log.info(
-                    "compile_retry.step: fixer returned chars=%s summary=%s",
+                    "compile_retry.step: fixer returned chars=%s "
+                    "zones_changed=%s summary=%s",
                     len(current_latex),
+                    fix_update.zones_changed or [],
                     (fix_update.summary_of_changes or "")[:120],
                 )
             except Exception as fix_err:
@@ -397,6 +399,7 @@ def compile_with_retry(
                     "compile_retry.error: fixer failed - %s", fix_err
                 )
                 raise e
+
 
     log.error("compile_retry.error: max retries exceeded")
     raise Exception("Max retries exceeded in compilation loop.")
@@ -1635,6 +1638,9 @@ async def chat_apply_proposal(
 
 
 if __name__ == "__main__":
+    import os
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.getenv("PORT", "8001"))
+    log.info("Starting Resume Maker backend on port %s", port)
+    uvicorn.run(app, host="0.0.0.0", port=port)

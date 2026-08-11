@@ -18,18 +18,67 @@ except ImportError:
 log = get_logger("zone_agents")
 
 
+def _pre_escape_backslashes(raw: str) -> str:
+    """Pre-process raw LLM text before JSON parse.
+
+    Some LLMs emit single backslashes in JSON string values that are
+    invalid JSON escape sequences (e.g. ``\s`` in ``\section``,
+    ``\r`` in ``\resumeItem``).  Python's ``json.loads`` silently drops
+    the backslash, turning ``\section`` into ``section``.
+
+    We escape every bare backslash that is NOT already part of a valid
+    two-character JSON escape sequence (``\n``, ``\t``, ``\r``, ``\\",
+    ``\"``, ``\/``, ``\b``, ``\f``, ``\uXXXX``) so that JSON can parse
+    it correctly.
+
+    Args:
+        raw: Raw text returned by the LLM (may or may not be JSON).
+
+    Returns:
+        Text with single backslashes escaped to double backslashes.
+    """
+    # Only process the inside of JSON string values to avoid breaking
+    # structural JSON characters.  We replace every \ not followed by
+    # a valid JSON escape char with \\.
+    return re.sub(
+        r'\\(?!["\\bfnrtu/])',
+        r"\\\\" ,
+        raw,
+    )
+
+
+def _sanitize_tex_json(obj: Any) -> Any:
+    """Restore TeX control sequences mangled by JSON decode.
+
+    De-duplicates double-double backslashes introduced by some LLMs
+    (``\\\\cmd`` → ``\\cmd``).
+    """
+    if isinstance(obj, str):
+        # De-duplicate \\\\cmd → \\cmd (over-escaped by some LLMs)
+        obj = re.sub(r"\\\\\\\\([a-zA-Z])", r"\\\\\1", obj)
+        return obj
+    elif isinstance(obj, dict):
+        return {k: _sanitize_tex_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_sanitize_tex_json(x) for x in obj]
+    return obj
+
+
 def _extract_json(text: str) -> dict:
     text = (text or "").strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
+    # Pre-escape invalid bare backslashes before parsing
+    text = _pre_escape_backslashes(text)
     try:
-        return json.loads(text)
+        return _sanitize_tex_json(json.loads(text))
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if match:
-            return json.loads(match.group(0))
+            return _sanitize_tex_json(json.loads(match.group(0)))
         raise
+
 
 
 class ZoneAgent:
@@ -56,6 +105,7 @@ class ZoneAgent:
             f"You are the {self.role} for a LaTeX resume. "
             f"You ONLY edit the {self.zone_id} zone. "
             f"Never return a full document or zone markers. "
+            f"CRITICAL: If using \\item bullets, you MUST enclose them within a valid list environment like \\begin{{itemize}} ... \\end{{itemize}} (or existing template list macro). Never return bare \\item lines outside a list environment.\n"
             f"Return JSON: {{\"content\": \"latex fragment for this zone only\", "
             f"\"summary\": \"one short sentence\"}}.\n\n"
             f"LaTeX guidance:\n{self.latex_hints}"
@@ -133,13 +183,55 @@ class SkillsAgent(ZoneAgent):
     )
 
 
+class ProjectsAgent(ZoneAgent):
+    zone_id = "PROJECTS"
+    role = "Projects specialist"
+    latex_hints = (
+        "Check the preamble for custom macros. "
+        "If \\resumeProjectHeading is defined: use "
+        "\\resumeProjectHeading{{\\textbf{{Name}}}}{{Date}} then "
+        "\\resumeItemListStart / \\resumeItem{{...}} / \\resumeItemListEnd. "
+        "If \\resumeProjectHeading is NOT defined: use "
+        "\\subsection*{{Name}} + \\begin{{itemize}} \\item bullets \\end{{itemize}}. "
+        "Never invent macros that are not defined in the preamble. "
+        "No \\section commands."
+    )
+
 ZONE_AGENT_CLASSES = {
     "HEADER": HeaderAgent,
     "SUMMARY": SummaryAgent,
     "EXPERIENCE": ExperienceAgent,
     "EDUCATION": EducationAgent,
     "SKILLS": SkillsAgent,
+    "PROJECTS": ProjectsAgent,
 }
+
+# Maps lowercase words in zone descriptions/kinds to agent class keys
+_DESC_TO_AGENT: list[tuple[tuple[str, ...], str]] = [
+    (("experience", "work", "job", "employment", "career"), "EXPERIENCE"),
+    (("project", "portfolio", "work sample"), "PROJECTS"),
+    (("education", "degree", "school", "university", "academic"), "EDUCATION"),
+    (("skill", "stack", "technolog", "language", "tool"), "SKILLS"),
+    (("summary", "about", "profile", "objective"), "SUMMARY"),
+    (("header", "contact", "name", "heading", "personal"), "HEADER"),
+]
+
+
+def _description_to_agent_key(description: str, kind: str) -> Optional[str]:
+    """Map a zone description/kind string to a semantic agent class key.
+
+    Args:
+        description: Human-readable zone description (e.g. 'Work experience').
+        kind: Zone kind string (e.g. 'predefined_experience').
+
+    Returns:
+        Agent class key like ``'EXPERIENCE'``, or ``None`` if no match.
+    """
+    text = (description + " " + kind).lower()
+    for keywords, agent_key in _DESC_TO_AGENT:
+        if any(kw in text for kw in keywords):
+            return agent_key
+    return None
 
 
 class ZoneAgentRouter:
@@ -149,6 +241,57 @@ class ZoneAgentRouter:
         self.agents: Dict[str, ZoneAgent] = {
             zid: cls() for zid, cls in ZONE_AGENT_CLASSES.items()
         }
+
+    def _resolve_agent(
+        self,
+        zone_id: str,
+        zone_catalog: Optional[List[Dict]] = None,
+    ) -> ZoneAgent:
+        """Return the best specialist for *zone_id*.
+
+        For named zone IDs (e.g. ``EXPERIENCE``) we do a direct lookup.
+        For numeric zone IDs (e.g. ``'2'``) we inspect *zone_catalog* to
+        map the zone's description/kind to a semantic agent key.
+
+        Args:
+            zone_id: Zone identifier string from the zone engine.
+            zone_catalog: List of ``{zone_no, description, kind}`` dicts
+                from :meth:`ZoneDocument.catalog`.
+
+        Returns:
+            Best matching :class:`ZoneAgent` instance.
+        """
+        # Direct named-key lookup
+        agent = self.agents.get(zone_id.upper()) or self.agents.get(zone_id)
+        if agent:
+            return agent
+
+        # Try resolving numeric ID via zone catalog
+        if zone_catalog:
+            for entry in zone_catalog:
+                if str(entry.get("zone_no")) == str(zone_id):
+                    desc = entry.get("description", "")
+                    kind = entry.get("kind", "")
+                    agent_key = _description_to_agent_key(desc, kind)
+                    if agent_key and agent_key in self.agents:
+                        resolved = self.agents[agent_key]
+                        log.info(
+                            "zone_agent.resolve: zone=%s desc=%r "
+                            "-> agent=%s",
+                            zone_id, desc, agent_key,
+                        )
+                        return resolved
+
+        # Generic fallback
+        fallback = ZoneAgent()
+        fallback.zone_id = zone_id
+        fallback.role = f"{zone_id} specialist"
+        fallback.latex_hints = "Return valid LaTeX for this zone only."
+        log.warning(
+            "zone_agent.resolve: no specialist for zone=%s, using generic",
+            zone_id,
+        )
+        return fallback
 
     def _classify(
         self,
@@ -197,6 +340,7 @@ class ZoneAgentRouter:
             msg = user_message.lower()
             mapping = [
                 (("experience", "job", "work", "role", "company"), "EXPERIENCE"),
+                (("project", "portfolio", "github"), "PROJECTS"),
                 (("education", "degree", "university", "college"), "EDUCATION"),
                 (("skill", "stack", "technolog"), "SKILLS"),
                 (("summary", "about", "profile", "objective"), "SUMMARY"),
@@ -230,6 +374,7 @@ class ZoneAgentRouter:
         provider: Optional[str] = None,
         model: Optional[str] = None,
         api_key: Optional[str] = None,
+        zone_catalog: Optional[List[Dict]] = None,
     ) -> Dict[str, Any]:
         available = zone_engine.list_zones(latex_code)
         if not available:
@@ -260,13 +405,7 @@ class ZoneAgentRouter:
         ]
 
         for zone_id in targets:
-            agent = self.agents.get(zone_id.upper()) or self.agents.get(zone_id)
-            if not agent:
-                # Generic fallback for unknown custom zones
-                agent = ZoneAgent()
-                agent.zone_id = zone_id
-                agent.role = f"{zone_id} specialist"
-                agent.latex_hints = "Return valid LaTeX for this zone only."
+            agent = self._resolve_agent(zone_id, zone_catalog)
 
             try:
                 content, summary = agent.run(

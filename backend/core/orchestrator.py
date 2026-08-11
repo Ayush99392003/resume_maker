@@ -20,17 +20,42 @@ from .zone_document import ZoneDocument
 log = get_logger("orchestrator")
 
 
+def _pre_escape_backslashes(raw: str) -> str:
+    """Escape bare backslashes before JSON parse.
+
+    Prevents ``\\section`` from losing its backslash when Python's
+    ``json.loads`` treats ``\\s`` as an invalid escape and drops ``\\``.
+
+    Only ``\\`` NOT already followed by a valid JSON escape character is
+    doubled.
+    """
+    return re.sub(r'\\(?!["\\bfnrtu/])', r"\\\\", raw)
+
+
+def _sanitize_tex_json(obj: Any) -> Any:
+    """De-duplicate double-double backslashes left by over-eager LLMs."""
+    if isinstance(obj, str):
+        obj = re.sub(r"\\\\\\\\([a-zA-Z])", r"\\\\\\1", obj)
+        return obj
+    elif isinstance(obj, dict):
+        return {k: _sanitize_tex_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_sanitize_tex_json(x) for x in obj]
+    return obj
+
+
 def _extract_json(text: str) -> dict:
     text = (text or "").strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
+    text = _pre_escape_backslashes(text)
     try:
-        return json.loads(text)
+        return _sanitize_tex_json(json.loads(text))
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if match:
-            return json.loads(match.group(0))
+            return _sanitize_tex_json(json.loads(match.group(0)))
         raise
 
 

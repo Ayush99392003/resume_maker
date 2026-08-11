@@ -179,6 +179,12 @@ def soften_latex_for_tectonic(latex: str) -> Tuple[str, List[str]]:
             src = src.replace(a, b)
             changes.append(f"replaced {a} -> {b}")
 
+    # Auto-repair stripped \esume macros from legacy session state
+    if r"\esume" in src:
+        src, n = re.subn(r"\\esume([A-Za-z])", r"\\resume\1", src)
+        if n:
+            changes.append("repaired \\esume -> \\resume")
+
     # Remaining Font Awesome icons: \faPhone, \faGithub, \faMapMarker* …
     # Require a capital letter after "fa" so we never touch \fancyhf / \familydefault.
     leftover_fa = sorted(set(re.findall(r"\\fa[A-Z][A-Za-z]*\*?", src)))
