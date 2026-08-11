@@ -22,6 +22,8 @@ try:
         sync_session_from_document,
     )
     from core.logging_setup import get_logger
+    from core.line_indexer import build_debug_payload
+    from core.delta_patcher import patch_latex, apply_zone_delta
     from core import config  # noqa: F401
 except ImportError:
     from ..llm_router import ChatMessage, llm_router
@@ -36,6 +38,8 @@ except ImportError:
         sync_session_from_document,
     )
     from .logging_setup import get_logger
+    from .line_indexer import build_debug_payload
+    from .delta_patcher import patch_latex, apply_zone_delta
     from . import config  # noqa: F401
 
 log = get_logger("ai_agent")
@@ -73,6 +77,31 @@ class AgentTurnResult(BaseModel):
     zone_document: Optional[Dict[str, Any]] = None
 
 
+def _sanitize_tex_json(obj: Any) -> Any:
+    """Restore TeX control sequences mangled by JSON decode.
+
+    JSON decoding converts ``\r`` to a carriage-return character, which
+    strips the ``r`` from macros like ``\resumeItem``.  We only repair
+    the specific known patterns rather than blindly escaping all control
+    characters, which would break ``\textbf``, ``\textit``, ``\texttt`` etc.
+
+    Specifically fixed:
+    - ``\r`` (CR) followed by a letter  → ``\\r`` (restores ``\resume*``)
+    - ``\\\\`` (double-double-backslash) → ``\\`` (de-duplicates over-escaped)
+    """
+    if isinstance(obj, str):
+        # Fix CR + letter → \r + letter  (restores \resumeItem etc.)
+        obj = re.sub(r"\r([a-zA-Z])", r"\\r\1", obj)
+        # De-duplicate \\\\cmd → \\cmd (over-escaped by some LLMs)
+        obj = re.sub(r"\\\\\\\\([a-zA-Z])", r"\\\\\1", obj)
+        return obj
+    elif isinstance(obj, dict):
+        return {k: _sanitize_tex_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_sanitize_tex_json(x) for x in obj]
+    return obj
+
+
 def _extract_json(text: str) -> dict:
     """Parse JSON from model output, tolerating markdown fences."""
     text = text.strip()
@@ -80,12 +109,12 @@ def _extract_json(text: str) -> dict:
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
     try:
-        return json.loads(text)
+        return _sanitize_tex_json(json.loads(text))
     except json.JSONDecodeError as e:
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if match:
             try:
-                return json.loads(match.group(0))
+                return _sanitize_tex_json(json.loads(match.group(0)))
             except json.JSONDecodeError as e2:
                 log.error("agent.error: json extract failed - %s", e2)
                 raise
@@ -240,20 +269,85 @@ class AIAgent:
         model: Optional[str] = None,
         api_key: Optional[str] = None,
     ) -> ResumeUpdate:
+        """Repair a broken LaTeX document using a line-indexed delta patch.
+
+        Strategy
+        --------
+        1. Build a minimal line-indexed JSON debug payload from the broken
+           zone so the fixer agent sees only the relevant context lines.
+        2. The agent returns a compact delta specifying only changed lines/
+           ranges (``fixed_lines``) or a corrected zone fragment
+           (``fixed_zone_id`` + ``fixed_zone_content``).
+        3. Apply the delta surgically via :func:`patch_latex` or
+           :func:`apply_zone_delta`, avoiding any full-document rewrites.
+        4. Fall back to zone-level or full-document replacement if the agent
+           returns the legacy response shape.
+
+        Args:
+            broken_latex: Full LaTeX source that failed to compile.
+            error_logs: Raw Tectonic error log string.
+            provider: LLM provider override.
+            model: Model name override.
+            api_key: API key override.
+
+        Returns:
+            :class:`ResumeUpdate` with the patched LaTeX and a summary.
+        """
         zones = zone_engine.list_zones(broken_latex)
-        system = (
-            "Repair broken LaTeX. Prefer fixing only the affected zone(s). "
-            "Return JSON either "
-            '{"zones": {"ZONE": "fixed fragment"}, "summary_of_changes": "..."} '
-            'or {"latex_code": "FULL fixed document", "summary_of_changes": "..."}. '
-            "Preserve all ZONE markers exactly."
-        )
+        debug_payload = build_debug_payload(broken_latex, error_logs or "")
         log.info(
-            "agent.step: fix_latex_error zones=%s log_chars=%s",
+            "agent.step: fix_latex_error zones=%s target_zone=%s "
+            "context_lines=%s log_chars=%s",
             zones,
+            debug_payload.get("target_zone"),
+            len(debug_payload.get("lines", {})),
             len(error_logs or ""),
         )
-        user = f"Zones: {zones}\n\nLogs:\n{error_logs}\n\nBroken LaTeX:\n{broken_latex}"
+
+        system = (
+            "You are a LaTeX repair specialist.  You receive a JSON debug "
+            "payload with:\n"
+            "  - error_log: the Tectonic compilation error\n"
+            "  - target_zone: zone id where the error occurred\n"
+            "  - line_range: [start, end] of that zone\n"
+            "  - lines: {\"lineno\": \"content\"} — ONLY the relevant lines\n"
+            "\n"
+            "Return JSON with EXACTLY one of these shapes:\n"
+            "\n"
+            "Shape A — line delta (preferred, most precise):\n"
+            "{\n"
+            "  \"fixed_zone_id\": \"EXPERIENCE\",\n"
+            "  \"fixed_lines\": {\n"
+            "    \"163-166\": \"\\\\begin{itemize}\\n"
+            "\\\\item Bullet\\n\\\\end{itemize}\"\n"
+            "  },\n"
+            "  \"summary_of_changes\": \"brief description\"\n"
+            "}\n"
+            "\n"
+            "Shape B — whole-zone content replacement:\n"
+            "{\n"
+            "  \"fixed_zone_id\": \"EXPERIENCE\",\n"
+            "  \"fixed_zone_content\": \"corrected zone inner text\",\n"
+            "  \"summary_of_changes\": \"brief description\"\n"
+            "}\n"
+            "\n"
+            "Shape C — legacy zone map (fallback only):\n"
+            "{\n"
+            "  \"zones\": {\"ZONE_ID\": \"fixed fragment\"},\n"
+            "  \"summary_of_changes\": \"...\"\n"
+            "}\n"
+            "\n"
+            "Rules:\n"
+            "- NEVER output a full LaTeX document unless absolutely necessary.\n"
+            "- CRITICAL: enclose all \\item lines in "
+            "\\begin{itemize}...\\end{itemize}.\n"
+            "- Preserve all % ZONE:N:START / END markers exactly.\n"
+            "- Only fix the lines shown; do not invent new content."
+        )
+
+        import json as _json
+        user = _json.dumps(debug_payload, ensure_ascii=False)
+
         try:
             data, _, _ = self._chat_json(
                 system,
@@ -261,30 +355,68 @@ class AIAgent:
                 provider=provider,
                 model=model,
                 api_key=api_key,
-                temperature=0.1,
+                temperature=0.05,
             )
-        except Exception as e:
-            log.exception("agent.error: fix_latex_error llm failed - %s", e)
+        except Exception as exc:
+            log.exception("agent.error: fix_latex_error llm failed - %s", exc)
             raise
+
+        summary = data.get("summary_of_changes", "Fixed compile errors")
+
+        # ── Shape A: line delta ───────────────────────────────────────────
+        fixed_lines = data.get("fixed_lines")
+        if fixed_lines and isinstance(fixed_lines, dict):
+            patched = patch_latex(broken_latex, fixed_lines)
+            changed_zone = data.get("fixed_zone_id", "")
+            log.info(
+                "agent.step: fix via line-delta zone=%s patches=%s",
+                changed_zone,
+                len(fixed_lines),
+            )
+            return ResumeUpdate(
+                latex_code=patched,
+                summary_of_changes=summary,
+                is_complete_document=True,
+                zones_changed=[changed_zone] if changed_zone else [],
+            )
+
+        # ── Shape B: whole-zone content replacement ───────────────────────
+        fixed_zone_content = data.get("fixed_zone_content")
+        fixed_zone_id = data.get("fixed_zone_id")
+        if fixed_zone_content is not None and fixed_zone_id:
+            patched = apply_zone_delta(
+                broken_latex, fixed_zone_id, fixed_zone_content
+            )
+            log.info(
+                "agent.step: fix via zone-content replacement zone=%s",
+                fixed_zone_id,
+            )
+            return ResumeUpdate(
+                latex_code=patched,
+                summary_of_changes=summary,
+                is_complete_document=True,
+                zones_changed=[fixed_zone_id],
+            )
+
+        # ── Shape C: legacy zone map (backward compat) ────────────────────
         if data.get("zones"):
             latex = zone_engine.replace_zones(broken_latex, data["zones"])
             log.info(
-                "agent.step: fix via zones %s", list(data["zones"].keys())
+                "agent.step: fix via legacy zone-map %s",
+                list(data["zones"].keys()),
             )
             return ResumeUpdate(
                 latex_code=latex,
-                summary_of_changes=data.get(
-                    "summary_of_changes", "Fixed compile errors"
-                ),
+                summary_of_changes=summary,
                 is_complete_document=True,
                 zones_changed=list(data["zones"].keys()),
             )
-        log.info("agent.step: fix via full document rewrite")
+
+        # ── Last resort: full document rewrite ────────────────────────────
+        log.info("agent.step: fix via full document rewrite (last resort)")
         return ResumeUpdate(
             latex_code=data.get("latex_code", broken_latex),
-            summary_of_changes=data.get(
-                "summary_of_changes", "Fixed compile errors"
-            ),
+            summary_of_changes=summary,
             is_complete_document=True,
             zones_changed=[],
         )

@@ -248,8 +248,14 @@ def import_overleaf_url(url: str) -> ImportResult:
 
     last_err: Optional[Exception] = None
     html_follow: List[str] = []
+    visited = set()
+    queue = list(candidates)
 
-    for cand in candidates + html_follow:
+    while queue:
+        cand = queue.pop(0)
+        if cand in visited:
+            continue
+        visited.add(cand)
         log.debug("try download %s", cand)
         try:
             data, final = _download(cand)
@@ -286,7 +292,12 @@ def import_overleaf_url(url: str) -> ImportResult:
                 continue
 
         text = _read_text(data)
-        if "\\documentclass" in text:
+        is_html = (
+            text.lstrip().startswith("<!")
+            or text.lstrip().startswith("<html")
+            or "<html" in text[:300].lower()
+        )
+        if "\\documentclass" in text and not is_html:
             # Single tex file — still stage into a project dir
             dest = _new_import_dir()
             main_path = dest / "main.tex"
@@ -304,13 +315,13 @@ def import_overleaf_url(url: str) -> ImportResult:
         if ("<html" in text.lower() or "overleaf" in text.lower()) and not html_follow:
             html_follow = _try_html_for_zip_links(text, final)[:12]
             for extra in html_follow:
-                if extra not in candidates:
-                    candidates.append(extra)
+                if extra not in visited and extra not in queue:
+                    queue.append(extra)
             # GitHub repos discovered from page
             for link in list(html_follow):
                 gz = _github_zip_url(link)
-                if gz and gz not in candidates:
-                    candidates.append(gz)
+                if gz and gz not in visited and gz not in queue:
+                    queue.append(gz)
             last_err = OverleafImportError(
                 "Got HTML page; trying linked zip/GitHub downloads…"
             )
@@ -323,7 +334,7 @@ def import_overleaf_url(url: str) -> ImportResult:
     log.error(
         "import.error: all candidates failed last=%s tried=%s",
         last_err,
-        len(candidates) + len(html_follow),
+        len(visited),
     )
     raise OverleafImportError(
         "Could not download template from that link. "
