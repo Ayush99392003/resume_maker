@@ -11,31 +11,31 @@ from pydantic import BaseModel, Field
 try:
     from llm_router import ChatMessage, llm_router
     from core.logging_setup import get_logger
+    from core.zone_agents import (
+        _pre_escape_backslashes,
+        _clean_backslash_typos,
+        _escape_raw_latex_chars,
+    )
 except ImportError:
     from ..llm_router import ChatMessage, llm_router  # type: ignore
     from .logging_setup import get_logger
+    from .zone_agents import (
+        _pre_escape_backslashes,
+        _clean_backslash_typos,
+        _escape_raw_latex_chars,
+    )
 
 from .zone_document import ZoneDocument
 
 log = get_logger("orchestrator")
 
 
-def _pre_escape_backslashes(raw: str) -> str:
-    """Escape bare backslashes before JSON parse.
-
-    Prevents ``\\section`` from losing its backslash when Python's
-    ``json.loads`` treats ``\\s`` as an invalid escape and drops ``\\``.
-
-    Only ``\\`` NOT already followed by a valid JSON escape character is
-    doubled.
-    """
-    return re.sub(r'\\(?!["\\bfnrtu/])', r"\\\\", raw)
-
-
 def _sanitize_tex_json(obj: Any) -> Any:
     """De-duplicate double-double backslashes left by over-eager LLMs."""
     if isinstance(obj, str):
-        obj = re.sub(r"\\\\\\\\([a-zA-Z])", r"\\\\\\1", obj)
+        obj = re.sub(r"\\\\\\\\([a-zA-Z])", r"\\\\\1", obj)
+        obj = _clean_backslash_typos(obj)
+        obj = _escape_raw_latex_chars(obj)
         return obj
     elif isinstance(obj, dict):
         return {k: _sanitize_tex_json(v) for k, v in obj.items()}

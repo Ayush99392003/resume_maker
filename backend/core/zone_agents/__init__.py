@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
+from pydantic import BaseModel, Field, field_validator
 
 try:
     from llm_router import ChatMessage, llm_router
@@ -19,7 +20,7 @@ log = get_logger("zone_agents")
 
 
 def _pre_escape_backslashes(raw: str) -> str:
-    """Pre-process raw LLM text before JSON parse.
+    r"""Pre-process raw LLM text before JSON parse.
 
     Some LLMs emit single backslashes in JSON string values that are
     invalid JSON escape sequences (e.g. ``\s`` in ``\section``,
@@ -37,14 +38,36 @@ def _pre_escape_backslashes(raw: str) -> str:
     Returns:
         Text with single backslashes escaped to double backslashes.
     """
-    # Only process the inside of JSON string values to avoid breaking
-    # structural JSON characters.  We replace every \ not followed by
-    # a valid JSON escape char with \\.
-    return re.sub(
-        r'\\(?!["\\bfnrtu/])',
-        r"\\\\" ,
-        raw,
+    # Escape single backslashes that are:
+    # 1. Not adjacent to another backslash
+    # 2. Followed by a non-JSON escape character OR
+    #    Followed by b/f/n/r/t and a letter (e.g. \begin, \name) OR
+    #    Followed by u but not 4 hex digits (e.g. \user)
+    pattern = (
+        r'(?<!\\)\\(?!\\)(?:'
+        r'(?!["\\/bfnrtu])|'
+        r'(?=[bfnrt][a-zA-Z])|'
+        r'(?=u(?![0-9a-fA-F]{4}))'
+        r')'
     )
+    return re.sub(pattern, r"\\\\", raw)
+
+
+def _clean_backslash_typos(text: str) -> str:
+    """Restore backslashes on commands merged with newlines (e.g. \\nitem)."""
+    pattern = (
+        r'\\n(item|begin|end|cventry|cvitem|section|'
+        r'subsection|textbf|textit|href)\b'
+    )
+    return re.sub(pattern, r'\n\\\1', text)
+
+
+def _escape_raw_latex_chars(text: str) -> str:
+    """Escape raw %, _, and # characters not preceded by a backslash."""
+    text = re.sub(r'(?<!\\)%', r'\%', text)
+    text = re.sub(r'(?<!\\)_', r'\_', text)
+    text = re.sub(r'(?<!\\)#', r'\#', text)
+    return text
 
 
 def _sanitize_tex_json(obj: Any) -> Any:
@@ -56,6 +79,8 @@ def _sanitize_tex_json(obj: Any) -> Any:
     if isinstance(obj, str):
         # De-duplicate \\\\cmd → \\cmd (over-escaped by some LLMs)
         obj = re.sub(r"\\\\\\\\([a-zA-Z])", r"\\\\\1", obj)
+        obj = _clean_backslash_typos(obj)
+        obj = _escape_raw_latex_chars(obj)
         return obj
     elif isinstance(obj, dict):
         return {k: _sanitize_tex_json(v) for k, v in obj.items()}
@@ -81,6 +106,57 @@ def _extract_json(text: str) -> dict:
 
 
 
+class ZoneAgentResponse(BaseModel):
+    content: str = Field(
+        ...,
+        description=(
+            "The updated LaTeX code fragment for this zone only. "
+            "Never return a full document or zone markers."
+        )
+    )
+    summary: str = Field(
+        ...,
+        description="A short, one-sentence summary of the changes made."
+    )
+
+    @field_validator("content")
+    @classmethod
+    def check_no_full_document(cls, v: str) -> str:
+        bad_commands = [
+            "\\documentclass",
+            "\\begin{document}",
+            "\\end{document}",
+        ]
+        for cmd in bad_commands:
+            if cmd in v:
+                raise ValueError(
+                    f"Do not include full document commands like '{cmd}'. "
+                    "Only return the LaTeX fragment for this specific zone."
+                )
+        return v
+
+    @field_validator("content")
+    @classmethod
+    def check_no_zone_markers(cls, v: str) -> str:
+        if "% ZONE:" in v or "ZONE:" in v:
+            raise ValueError(
+                "Do not include zone markers like '% ZONE:NAME:START' or "
+                "'% ZONE:NAME:END' in the content."
+            )
+        return v
+
+    @field_validator("content")
+    @classmethod
+    def check_valid_item_list(cls, v: str) -> str:
+        if "\\item" in v:
+            if "\\begin{" not in v or "\\end{" not in v:
+                raise ValueError(
+                    "Bare \\item bullets are forbidden. Enclose them in a "
+                    "list environment like \\begin{itemize} ... \\end{itemize}."
+                )
+        return v
+
+
 class ZoneAgent:
     """Specialist that owns a single resume zone."""
 
@@ -98,16 +174,36 @@ class ZoneAgent:
         provider: Optional[str],
         model: Optional[str],
         api_key: Optional[str],
+        max_retries: int = 3,
     ) -> Tuple[str, str]:
         """Return (new_zone_latex, short_summary)."""
         mode = "initial fill from bio" if is_initial else "targeted edit"
         system = (
-            f"You are the {self.role} for a LaTeX resume. "
-            f"You ONLY edit the {self.zone_id} zone. "
-            f"Never return a full document or zone markers. "
-            f"CRITICAL: If using \\item bullets, you MUST enclose them within a valid list environment like \\begin{{itemize}} ... \\end{{itemize}} (or existing template list macro). Never return bare \\item lines outside a list environment.\n"
-            f"Return JSON: {{\"content\": \"latex fragment for this zone only\", "
-            f"\"summary\": \"one short sentence\"}}.\n\n"
+            f"You are the {self.role} for a LaTeX resume.\n"
+            f"You ONLY edit the {self.zone_id} zone. Never return a full "
+            f"document, preamble, or zone markers.\n"
+            f"CRITICAL: If using \\item bullets, you MUST enclose them within "
+            f"a valid list environment like \\begin{{itemize}} ... "
+            f"\\end{{itemize}} (or the template's designated list macro). "
+            f"Never return bare \\item lines outside a list environment.\n"
+            f"Preserve all custom command styles, alignment, spacing, and "
+            f"formatting structure present in the original zone.\n"
+            f"Return your answer as a JSON object containing 'content' "
+            f"and 'summary' fields.\n\n"
+            f"--- EXAMPLES ---\n"
+            f"Example 1: Adding a skills item\n"
+            f"Request: Add Python, Java to Skills\n"
+            f"Response JSON: {{\n"
+            f"  \"content\": \"Python, Java\",\n"
+            f"  \"summary\": \"Added Python and Java to skills.\"\n"
+            f"}}\n\n"
+            f"Example 2: Adding experience bullets\n"
+            f"Request: Add bullet about database design\n"
+            f"Response JSON: {{\n"
+            f"  \"content\": \"\\\\begin{{itemize}}\\n"
+            f"\\\\item Designed database schema.\\\\end{{itemize}}\",\n"
+            f"  \"summary\": \"Added bullet point for database design.\"\n"
+            f"}}\n\n"
             f"LaTeX guidance:\n{self.latex_hints}"
         )
         user = (
@@ -117,23 +213,64 @@ class ZoneAgent:
             f"Other zones (context only, do not rewrite):\n{full_digest}\n\n"
             f"User request:\n{user_message}"
         )
-        resp = llm_router.chat(
-            [
-                ChatMessage(role="system", content=system),
-                ChatMessage(role="user", content=user),
-            ],
-            provider=provider,
-            model=model,
-            api_key=api_key,
-            temperature=0.35,
-            response_format="json",
+
+        messages = [
+            ChatMessage(role="system", content=system),
+            ChatMessage(role="user", content=user),
+        ]
+
+        for attempt in range(max_retries):
+            resp = llm_router.chat(
+                messages,
+                provider=provider,
+                model=model,
+                api_key=api_key,
+                temperature=0.35,
+                response_format="json",
+            )
+            raw_content = resp.content
+            try:
+                # Pre-escape invalid backslashes
+                sanitized = _pre_escape_backslashes(raw_content)
+                data = _extract_json(sanitized)
+            except Exception as e:
+                err_msg = (
+                    f"JSON parsing failed: {e}. Please ensure you return "
+                    "a valid JSON object matching the schema."
+                )
+                log.warning(
+                    "Attempt %d JSON parse failed: %s", attempt + 1, e
+                )
+                messages.append(
+                    ChatMessage(role="assistant", content=raw_content)
+                )
+                messages.append(ChatMessage(role="user", content=err_msg))
+                continue
+
+            try:
+                validated = ZoneAgentResponse.model_validate(data)
+                content = validated.content.strip()
+                content = _clean_backslash_typos(content)
+                summary = validated.summary.strip()
+                if not content:
+                    raise ValueError("content field is empty")
+                return content, summary
+            except Exception as e:
+                err_msg = (
+                    f"Validation failed:\n{e}\n"
+                    "Please fix these errors and return a valid JSON object."
+                )
+                log.warning(
+                    "Attempt %d validation failed: %s", attempt + 1, e
+                )
+                messages.append(
+                    ChatMessage(role="assistant", content=raw_content)
+                )
+                messages.append(ChatMessage(role="user", content=err_msg))
+
+        raise ValueError(
+            f"ZoneAgent {self.zone_id} failed after {max_retries} attempts."
         )
-        data = _extract_json(resp.content)
-        content = (data.get("content") or data.get("latex_code") or "").strip()
-        summary = (data.get("summary") or f"Updated {self.zone_id}").strip()
-        if not content:
-            raise ValueError(f"{self.zone_id} agent returned empty content")
-        return content, summary
 
 
 class HeaderAgent(ZoneAgent):

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Optional
+from pydantic import BaseModel
+from typing import Dict, List, Optional, Type
 
 from .anthropic_provider import AnthropicProvider
 from .aws import AWSProvider
@@ -88,6 +89,27 @@ class LLMRouter:
             model=model_name,
             temperature=temperature,
             response_format=response_format,
+        )
+
+    def chat_model(
+        self,
+        messages: List[ChatMessage],
+        response_model: Type[BaseModel],
+        *,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        api_key: Optional[str] = None,
+        temperature: float = 0.4,
+    ) -> BaseModel:
+        prov = self.get_provider(provider, api_key=api_key)
+        model_name = (model or self.default_model()).strip()
+        if not model_name:
+            raise ValueError("MODEL_NAME is required")
+        return prov.chat_model(
+            messages,
+            response_model,
+            model=model_name,
+            temperature=temperature,
         )
 
     def list_configured(self) -> Dict[str, bool]:

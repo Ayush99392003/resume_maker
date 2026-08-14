@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Type
+from pydantic import BaseModel
 
 from .base import ChatMessage, LLMProvider, LLMResponse
 
@@ -62,4 +63,23 @@ class OpenAIProvider(LLMProvider):
             model=model,
             raw=resp,
             usage=usage,
+        )
+
+    def chat_model(
+        self,
+        messages: List[ChatMessage],
+        response_model: Type[BaseModel],
+        *,
+        model: str,
+        temperature: float = 0.4,
+    ) -> BaseModel:
+        import instructor
+        client = instructor.from_openai(self.client)
+        return client.chat.completions.create(
+            model=model,
+            response_model=response_model,
+            messages=[
+                {"role": m.role, "content": m.content} for m in messages
+            ],
+            temperature=temperature,
         )

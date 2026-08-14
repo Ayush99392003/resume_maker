@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Type
+from pydantic import BaseModel
 
 
 @dataclass
@@ -40,6 +41,18 @@ class LLMProvider(ABC):
 
         response_format: None | "json" — request JSON when supported.
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    def chat_model(
+        self,
+        messages: List[ChatMessage],
+        response_model: Type[BaseModel],
+        *,
+        model: str,
+        temperature: float = 0.4,
+    ) -> BaseModel:
+        """Send a chat completion request returning a Pydantic model."""
         raise NotImplementedError
 
     def ensure_configured(self) -> None:
