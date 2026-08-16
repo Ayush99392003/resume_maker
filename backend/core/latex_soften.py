@@ -192,24 +192,133 @@ def soften_latex_for_tectonic(latex: str) -> Tuple[str, List[str]]:
         src = re.sub(r"\\fa[A-Z][A-Za-z]*\*?", "", src)
         changes.append(f"stripped leftover FA macros: {', '.join(leftover_fa)}")
 
-    has_myuline = r"\myuline" in src
-    has_def = (
-        r"\newcommand{\myuline}" in src
-        or r"\renewcommand{\myuline}" in src
-        or r"\providecommand{\myuline}" in src
-    )
-    if has_myuline and not has_def:
+    # Common resume macros that may be used across different template types
+    _FALLBACK_COMMANDS = [
+        (
+            r"\myuline",
+            r"\providecommand{\myuline}[1]{\textbf{#1}}",
+        ),
+        (
+            r"\cventry",
+            r"\providecommand{\cventry}[6]{\textbf{#2} -- #3 \hfill #1\\{\small #4 #5}\\\ifx&#6&\else#6\fi\par\medskip}",
+        ),
+        (
+            r"\cvitem",
+            r"\providecommand{\cvitem}[2]{\textbf{#1}: #2\par}",
+        ),
+        (
+            r"\resumeItemListStart",
+            r"\providecommand{\resumeItemListStart}{\begin{itemize}}",
+        ),
+        (
+            r"\resumeItemListEnd",
+            r"\providecommand{\resumeItemListEnd}{\end{itemize}}",
+        ),
+        (
+            r"\resumeSubHeadingListStart",
+            r"\providecommand{\resumeSubHeadingListStart}{\begin{itemize}}",
+        ),
+        (
+            r"\resumeSubHeadingListEnd",
+            r"\providecommand{\resumeSubHeadingListEnd}{\end{itemize}}",
+        ),
+        (
+            r"\resumeSubheading",
+            r"\providecommand{\resumeSubheading}[4]{\item \textbf{#1} \hfill #2\\\textit{#3} \hfill \textit{#4}\vspace{-2pt}}",
+        ),
+        (
+            r"\resumeProjectHeading",
+            r"\providecommand{\resumeProjectHeading}[2]{\item \textbf{#1} \hfill #2\vspace{-2pt}}",
+        ),
+        (
+            r"\resumeItem",
+            r"\providecommand{\resumeItem}[1]{\item #1}",
+        ),
+        (
+            r"\degree",
+            r"\providecommand{\degree}[1]{\textbf{#1}}",
+        ),
+        (
+            r"\school",
+            r"\providecommand{\school}[1]{\textit{#1}}",
+        ),
+        (
+            r"\institution",
+            r"\providecommand{\institution}[1]{\textit{#1}}",
+        ),
+        (
+            r"\location",
+            r"\providecommand{\location}[1]{#1}",
+        ),
+        (
+            r"\dates",
+            r"\providecommand{\dates}[1]{\hfill #1}",
+        ),
+        (
+            r"\gpa",
+            r"\providecommand{\gpa}[1]{GPA: #1}",
+        ),
+    ]
+
+    injected_defs = []
+    for macro_token, stub_def in _FALLBACK_COMMANDS:
+        has_macro = macro_token in src
+        has_def = (
+            f"\\newcommand{{{macro_token}}}" in src
+            or f"\\renewcommand{{{macro_token}}}" in src
+            or f"\\providecommand{{{macro_token}}}" in src
+            or f"\\newcommand{macro_token}" in src
+            or f"\\renewcommand{macro_token}" in src
+            or f"\\providecommand{macro_token}" in src
+        )
+        if has_macro and not has_def:
+            injected_defs.append(stub_def)
+            changes.append(f"injected fallback definition for {macro_token}")
+
+    if injected_defs:
+        stubs_block = "\n".join(injected_defs) + "\n"
         if r"\begin{document}" in src:
-            src = src.replace(
-                r"\begin{document}",
-                r"\providecommand{\myuline}[1]{\textbf{#1}}"
-                r"\begin{document}",
-                1,
-            )
-            changes.append("injected \\providecommand{\\myuline}")
+            src = src.replace(r"\begin{document}", stubs_block + r"\begin{document}", 1)
         else:
-            src = r"\providecommand{\myuline}[1]{\textbf{#1}}" + "\n" + src
-            changes.append("injected \\providecommand{\\myuline}")
+            src = stubs_block + src
+
+    # Normalize non-ASCII Unicode characters that crash 8-bit TeX fonts
+    unicode_map = {
+        "\u2010": "-",  # hyphen
+        "\u2011": "-",  # non-breaking hyphen
+        "\u2012": "-",  # figure dash
+        "\u2013": "--",  # en dash
+        "\u2014": "---",  # em dash
+        "\u2018": "'",  # left single quote
+        "\u2019": "'",  # right single quote
+        "\u201a": "'",  # single low quote
+        "\u201b": "'",  # single high-reversed quote
+        "\u201c": "``",  # left double quote
+        "\u201d": "''",  # right double quote
+        "\u201e": ",,",  # double low quote
+        "\u00a0": "~",  # non-breaking space
+        "\u202f": "~",  # narrow no-break space
+        "\u2022": "\\textbullet{}",  # bullet
+        "\u2026": "\\dots{}",  # ellipsis
+    }
+    for uc, rep in unicode_map.items():
+        if uc in src:
+            src = src.replace(uc, rep)
+            changes.append(f"normalized unicode {hex(ord(uc))} -> {rep}")
+
+    # Auto-escape bare currency dollar signs like $100k, $50, $85,000
+    src2, n_curr = re.subn(r"(?<!\\)\$(?=\d)", r"\$", src)
+    if n_curr:
+        src = src2
+        changes.append("escaped raw currency dollar signs ($ -> \\$)")
+
+    # Clean up lonely line-break \\ that trigger "There's no line here to end"
+    src2, n_lb = re.subn(r"(?m)^\s*\\\\(?:\s*\[[^\]]*\])?\s*$", "", src)
+    src2, n_lb2 = re.subn(r"(?m)^\s*\\\\\s*", "", src2)
+    src2, n_lb3 = re.subn(r"(\\\\[ \t]*){2,}", r"\\\\", src2)
+    if n_lb or n_lb2 or n_lb3:
+        src = src2
+        changes.append("cleaned up invalid leading/consecutive \\\\ breaks")
 
     if changes:
         log.info("soften.step: changes=%s", changes)
