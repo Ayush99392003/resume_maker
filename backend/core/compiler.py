@@ -10,8 +10,10 @@ from pathlib import Path
 
 try:
     from core.logging_setup import get_logger
+    from core.latex_soften import soften_latex_for_tectonic
 except ImportError:
     from .logging_setup import get_logger
+    from .latex_soften import soften_latex_for_tectonic
 
 log = get_logger("compiler")
 
@@ -192,9 +194,10 @@ class TectonicCompiler:
         If project_dir is set (Overleaf import with assets), write resume.tex
         into that directory and compile there so .cls/.sty/images resolve.
         """
+        code, _ = soften_latex_for_tectonic(latex_code or "")
         log.info(
             "compile.step: start chars=%s project_dir=%s",
-            len(latex_code or ""),
+            len(code),
             bool(project_dir),
         )
         if project_dir:
@@ -206,7 +209,7 @@ class TectonicCompiler:
                     logs=f"No project directory: {project_dir}",
                 )
             tex_file = root / "resume.tex"
-            tex_file.write_text(latex_code, encoding="utf-8")
+            tex_file.write_text(code, encoding="utf-8")
             self._run_tectonic(tex_file, root, root)
             pdf_file = root / "resume.pdf"
             if not pdf_file.exists():
@@ -218,7 +221,7 @@ class TectonicCompiler:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             tex_file = tmp_path / "resume.tex"
-            tex_file.write_text(latex_code, encoding="utf-8")
+            tex_file.write_text(code, encoding="utf-8")
             self._run_tectonic(tex_file, tmp_path, tmp_path)
             pdf_file = tmp_path / "resume.pdf"
             if not pdf_file.exists():

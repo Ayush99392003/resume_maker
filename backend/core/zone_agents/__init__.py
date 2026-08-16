@@ -22,35 +22,80 @@ log = get_logger("zone_agents")
 def _pre_escape_backslashes(raw: str) -> str:
     r"""Pre-process raw LLM text before JSON parse.
 
-    Some LLMs emit single backslashes in JSON string values that are
-    invalid JSON escape sequences (e.g. ``\s`` in ``\section``,
-    ``\r`` in ``\resumeItem``).  Python's ``json.loads`` silently drops
-    the backslash, turning ``\section`` into ``section``.
-
-    We escape every bare backslash that is NOT already part of a valid
-    two-character JSON escape sequence (``\n``, ``\t``, ``\r``, ``\\",
-    ``\"``, ``\/``, ``\b``, ``\f``, ``\uXXXX``) so that JSON can parse
-    it correctly.
+    Walk the string character-by-character, tracking whether we are inside
+    a JSON string literal.  When inside a string, double any backslash that
+    is NOT already part of a valid two-character JSON escape sequence
+    (``\\``, ``\"``, ``\/``, ``\b``, ``\f``, ``\n``, ``\r``, ``\t``,
+    ``\uXXXX``).  This correctly handles LaTeX commands like
+    ``\resumeItem``, ``\fancyhf``, ``\bullet``, ``\begin``, ``\end``
+    without mangling the ``\r``, ``\b``, ``\f`` prefix letters.
 
     Args:
         raw: Raw text returned by the LLM (may or may not be JSON).
 
     Returns:
-        Text with single backslashes escaped to double backslashes.
+        Text with bare LaTeX backslashes doubled so JSON can parse them.
     """
-    # Escape single backslashes that are:
-    # 1. Not adjacent to another backslash
-    # 2. Followed by a non-JSON escape character OR
-    #    Followed by b/f/n/r/t and a letter (e.g. \begin, \name) OR
-    #    Followed by u but not 4 hex digits (e.g. \user)
-    pattern = (
-        r'(?<!\\)\\(?!\\)(?:'
-        r'(?!["\\/bfnrtu])|'
-        r'(?=[bfnrt][a-zA-Z])|'
-        r'(?=u(?![0-9a-fA-F]{4}))'
-        r')'
-    )
-    return re.sub(pattern, r"\\\\", raw)
+    _JSON_ESCAPES = frozenset('"\\/ bfnrtu')
+    _HEX = frozenset('0123456789abcdefABCDEF')
+
+    result: list[str] = []
+    i = 0
+    n = len(raw)
+    in_string = False
+
+    while i < n:
+        ch = raw[i]
+        if not in_string:
+            result.append(ch)
+            if ch == '"':
+                in_string = True
+            i += 1
+            continue
+        # Inside a JSON string
+        if ch == '\\' and i + 1 < n:
+            nxt = raw[i + 1]
+            if nxt in _JSON_ESCAPES:
+                # Valid JSON escape — check \uXXXX specifically
+                if nxt == 'u':
+                    hex4 = raw[i + 2: i + 6]
+                    if (
+                        len(hex4) == 4
+                        and all(c in _HEX for c in hex4)
+                    ):
+                        # Valid \uXXXX — pass through as-is
+                        result.append(ch)
+                        result.append(nxt)
+                        i += 2
+                        continue
+                    # else: \u not followed by 4 hex — fall through to double
+                elif nxt != 'u':
+                    # Standard two-char escape: pass through
+                    # BUT: if nxt is b/f/n/r/t and the char after is alpha,
+                    # this is a LaTeX command (e.g. \begin, \resumeItem)
+                    # and must be doubled.
+                    if nxt in 'bfnrt':
+                        after = raw[i + 2] if i + 2 < n else ''
+                        if after.isalpha():
+                            # LaTeX command — double the backslash
+                            result.append('\\\\')
+                            i += 1
+                            continue
+                    # Genuine JSON escape (\n, \t, \r, \\, \", etc.)
+                    result.append(ch)
+                    result.append(nxt)
+                    i += 2
+                    continue
+            # Not a valid JSON escape — double the backslash
+            result.append('\\\\')
+            i += 1
+            continue
+        if ch == '"':
+            in_string = False
+        result.append(ch)
+        i += 1
+
+    return ''.join(result)
 
 
 def _clean_backslash_typos(text: str) -> str:
@@ -62,12 +107,116 @@ def _clean_backslash_typos(text: str) -> str:
     return re.sub(pattern, r'\n\\\1', text)
 
 
+# Characters that need escaping in LaTeX text mode
+_LATEX_ESCAPABLE: dict[str, str] = {
+    '&': r'\&',
+    '$': r'\$',
+    '^': r'\^{}',
+    '~': r'\textasciitilde{}',
+    '%': r'\%',
+    '_': r'\_',
+    '#': r'\#',
+}
+
+
+def _is_math_pair(text: str, start_idx: int) -> int:
+    """Return closing $ index if text[start_idx] starts a math pair, else -1."""
+    if start_idx + 1 >= len(text):
+        return -1
+    # If immediately followed by a digit, currency symbol, or whitespace, it's currency
+    next_ch = text[start_idx + 1]
+    if next_ch.isdigit() or next_ch in " \t\r\n.,;:)":
+        return -1
+    eol = text.find("\n", start_idx)
+    limit = eol if eol != -1 else len(text)
+    close_idx = text.find("$", start_idx + 1, limit)
+    if close_idx == -1:
+        return -1
+    # Check that closing $ is not escaped
+    if close_idx > 0 and text[close_idx - 1] == "\\":
+        return -1
+    inner = text[start_idx + 1: close_idx].strip()
+    # If inner looks like currency ($100k or $50 to $100), not math
+    if any(c.isdigit() for c in inner) and not any(
+        op in inner for op in "+-*/=^_\\{}<>"
+    ):
+        return -1
+    return close_idx
+
+
 def _escape_raw_latex_chars(text: str) -> str:
-    """Escape raw %, _, and # characters not preceded by a backslash."""
-    text = re.sub(r'(?<!\\)%', r'\%', text)
-    text = re.sub(r'(?<!\\)_', r'\_', text)
-    text = re.sub(r'(?<!\\)#', r'\#', text)
-    return text
+    """Context-aware escaper for bare LaTeX special characters.
+
+    Escapes ``%``, ``_``, ``#``, ``&``, ``$``, ``^``, ``~`` that are
+    NOT already escaped (preceded by ``\\``) and are NOT inside a
+    genuine ``$...$`` inline math region or a LaTeX comment.
+
+    Args:
+        text: LaTeX fragment from the LLM.
+
+    Returns:
+        Fragment with bare special characters escaped.
+    """
+    result: list[str] = []
+    i = 0
+    n = len(text)
+    math_end_idx = -1
+    prev_backslash = False
+
+    while i < n:
+        ch = text[i]
+
+        if prev_backslash:
+            # We are inside a control sequence name — emit unchanged.
+            result.append(ch)
+            prev_backslash = ch.isalpha()
+            i += 1
+            continue
+
+        if ch == '\\':
+            result.append(ch)
+            prev_backslash = True
+            i += 1
+            continue
+
+        # Check math mode boundary
+        if i < math_end_idx:
+            # Inside active math region
+            result.append(ch)
+            i += 1
+            continue
+
+        if ch == '$':
+            # Check if this starts a genuine math pair
+            closing = _is_math_pair(text, i)
+            if closing != -1:
+                math_end_idx = closing
+                result.append(ch)
+                i += 1
+                continue
+            # Currency dollar sign (e.g. $120k, $50, $85,000)
+            result.append(r"\$")
+            i += 1
+            continue
+
+        if ch == '%':
+            # Rest of line is a LaTeX comment — emit unchanged to EOL.
+            eol = text.find('\n', i)
+            if eol == -1:
+                result.append(text[i:])
+                break
+            result.append(text[i: eol + 1])
+            i = eol + 1
+            continue
+
+        replacement = _LATEX_ESCAPABLE.get(ch)
+        if replacement is not None:
+            result.append(replacement)
+        else:
+            result.append(ch)
+        i += 1
+
+    return ''.join(result)
 
 
 def _sanitize_tex_json(obj: Any) -> Any:
@@ -148,11 +297,28 @@ class ZoneAgentResponse(BaseModel):
     @field_validator("content")
     @classmethod
     def check_valid_item_list(cls, v: str) -> str:
+        """Ensure \\item lines are enclosed in a list environment.
+
+        Accepts both standard LaTeX environments (``\\begin{itemize}``)
+        and common custom list macros used in popular resume templates
+        (e.g. ``\\resumeItemListStart``, ``\\resumeSubHeadingListStart``).
+        """
+        _CUSTOM_LIST_OPENS = (
+            "\\resumeItemListStart",
+            "\\resumeSubHeadingListStart",
+            "\\resumeSubItemListStart",
+        )
         if "\\item" in v:
-            if "\\begin{" not in v or "\\end{" not in v:
+            has_std_env = (
+                "\\begin{" in v and "\\end{" in v
+            )
+            has_custom_env = any(macro in v for macro in _CUSTOM_LIST_OPENS)
+            if not has_std_env and not has_custom_env:
                 raise ValueError(
                     "Bare \\item bullets are forbidden. Enclose them in a "
-                    "list environment like \\begin{itemize} ... \\end{itemize}."
+                    "list environment like \\begin{itemize} ... "
+                    "\\end{itemize} or use a custom list macro such as "
+                    "\\resumeItemListStart."
                 )
         return v
 
@@ -296,9 +462,12 @@ class ExperienceAgent(ZoneAgent):
     zone_id = "EXPERIENCE"
     role = "Work experience specialist"
     latex_hints = (
-        "Use moderncv \\cventry{years}{title}{company}{city}{}{bullets} when "
-        "the template is moderncv, otherwise use itemize with bold roles. "
-        "Prefer quantified bullets. No \\section commands."
+        "For standard templates (article/modern): format each job as "
+        "\\textbf{Job Title} -- Company \\hfill Dates\n"
+        "\\begin{itemize}\n"
+        "\\item Quantified achievement or responsibility.\n"
+        "\\end{itemize}\n"
+        "For moderncv templates: use \\cventry. No \\section commands."
     )
 
 
@@ -306,8 +475,9 @@ class EducationAgent(ZoneAgent):
     zone_id = "EDUCATION"
     role = "Education specialist"
     latex_hints = (
-        "Use \\cventry or compact degree lines. Include school, degree, years. "
-        "No \\section commands."
+        "For standard templates: \\textbf{Degree in Field} -- University "
+        "\\hfill Years\n"
+        "For moderncv templates: use \\cventry. No \\section commands."
     )
 
 
@@ -315,8 +485,8 @@ class SkillsAgent(ZoneAgent):
     zone_id = "SKILLS"
     role = "Skills specialist"
     latex_hints = (
-        "Use \\cvitem{Category}{items} for moderncv, or a compact comma/"
-        "itemize list otherwise. Group by category when possible."
+        "For standard templates: \\textbf{Category}: Item 1, Item 2, Item 3\n"
+        "For moderncv templates: use \\cvitem{Category}{Items}. No \\section commands."
     )
 
 
@@ -593,6 +763,69 @@ class ZoneAgentRouter:
             "tool_trace": trace,
             "routed_zones": targets,
         }
+
+
+    def run_zone(
+        self,
+        *,
+        zone_no: int,
+        zone_description: str,
+        zone_kind: str,
+        current_zone: str,
+        full_digest: str,
+        user_message: str,
+        is_initial: bool,
+        provider: Optional[str],
+        model: Optional[str],
+        api_key: Optional[str],
+    ) -> tuple[str, str]:
+        """Run the appropriate ZoneAgent for a numbered document zone.
+
+        This is the unified entry point used by the orchestrator so that
+        *all* fill/edit operations pass through Pydantic validation and the
+        retry loop — eliminating the bypass path via ``_edit_zone_latex``.
+
+        Args:
+            zone_no: Numeric zone identifier in the ZoneDocument.
+            zone_description: Human-readable description (e.g. 'Work experience').
+            zone_kind: Kind string (e.g. 'predefined_experience').
+            current_zone: Current inner LaTeX of this zone.
+            full_digest: Digest of all zones for context.
+            user_message: The user's edit/fill request.
+            is_initial: True when this is an initial bio-fill.
+            provider: LLM provider override.
+            model: Model name override.
+            api_key: API key override.
+
+        Returns:
+            ``(new_zone_latex, short_summary)`` tuple.
+        """
+        agent = self._resolve_agent(
+            str(zone_no),
+            zone_catalog=[
+                {
+                    "zone_no": zone_no,
+                    "description": zone_description,
+                    "kind": zone_kind,
+                }
+            ],
+        )
+        log.info(
+            "zone_agent.run_zone: zone=%s agent=%s initial=%s",
+            zone_no,
+            agent.zone_id,
+            is_initial,
+        )
+        content, summary = agent.run(
+            user_message=user_message,
+            current_zone=current_zone,
+            full_digest=full_digest,
+            is_initial=is_initial,
+            provider=provider,
+            model=model,
+            api_key=api_key,
+        )
+        return content, summary
 
 
 zone_agent_router = ZoneAgentRouter()
