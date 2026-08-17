@@ -20,7 +20,11 @@ try:
     from core.ats_scorer import ats_scorer
     from core.indent_guard import indent_guard
     from core.refinement import refinement_manager, DraftVariant
-    from core.session_store import session_store
+    from core.session_store import (
+        session_store,
+        take_snapshot,
+        rollback_to_snapshot,
+    )
     from core.zones import zone_engine
     from core.logging_setup import get_logger, setup_logging
     from core.auth_store import auth_store
@@ -48,7 +52,11 @@ except ImportError:
     from .core.ats_scorer import ats_scorer
     from .core.indent_guard import indent_guard
     from .core.refinement import refinement_manager, DraftVariant
-    from .core.session_store import session_store
+    from .core.session_store import (
+        session_store,
+        take_snapshot,
+        rollback_to_snapshot,
+    )
     from .core.zones import zone_engine
     from .core.logging_setup import get_logger, setup_logging
     from .core.auth_store import auth_store
@@ -1400,6 +1408,10 @@ async def chat(
     history = [m.model_dump() for m in session.messages[:-1]]
 
     try:
+        # Persist a rollback snapshot before the orchestrator edits any zone.
+        # If the resulting LaTeX fails to compile, rollback_to_snapshot()
+        # restores the last-good state automatically.
+        take_snapshot(session, session_store)
         log.info("chat.step: run_chat_turn …")
         result = ai_agent.run_chat_turn(
             user_message=req.message,
@@ -1458,7 +1470,20 @@ async def chat(
             session.latex_code = final_latex
         except Exception as e:
             log.exception("chat.error: compile failed - %s", e)
-            result.reply = f"{result.reply}\n\n(Compile issue: {e})"
+            # Roll back to last-good snapshot so the session stays valid
+            rolled = rollback_to_snapshot(session, session_store)
+            if rolled:
+                log.info(
+                    "chat.step: rolled back to snapshot after compile failure"
+                )
+                final_latex = session.latex_code
+                result.reply = (
+                    f"{result.reply}\n\n"
+                    "(The edit could not compile — your previous resume "
+                    "has been restored. Please rephrase your request.)"
+                )
+            else:
+                result.reply = f"{result.reply}\n\n(Compile issue: {e})"
 
     session.active_provider = result.provider
     session.active_model = result.model

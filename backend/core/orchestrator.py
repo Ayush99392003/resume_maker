@@ -12,6 +12,7 @@ try:
     from llm_router import ChatMessage, llm_router
     from core.logging_setup import get_logger
     from core.zone_agents import (
+        zone_agent_router,
         _pre_escape_backslashes,
         _clean_backslash_typos,
         _escape_raw_latex_chars,
@@ -20,6 +21,7 @@ except ImportError:
     from ..llm_router import ChatMessage, llm_router  # type: ignore
     from .logging_setup import get_logger
     from .zone_agents import (
+        zone_agent_router,
         _pre_escape_backslashes,
         _clean_backslash_typos,
         _escape_raw_latex_chars,
@@ -572,29 +574,56 @@ class Orchestrator:
                         current = doc.zone_inner(n)
                         z = doc.get_zone(n)
                     except KeyError:
-                        log.warning("orch.error: %s unknown zone %s", intent, n)
+                        log.warning(
+                            "orch.error: %s unknown zone %s", intent, n
+                        )
                         continue
                     try:
-                        content, summary, prov, mod = _edit_zone_latex(
+                        # Primary path: validated ZoneAgent (Pydantic + retry)
+                        content, summary = zone_agent_router.run_zone(
                             zone_no=n,
-                            description=z.description,
-                            current=current,
-                            digest=digest,
+                            zone_description=z.description,
+                            zone_kind=z.kind,
+                            current_zone=current,
+                            full_digest=digest,
                             user_message=user_message,
-                            is_fill=(intent == "fill"),
+                            is_initial=(intent == "fill"),
                             provider=provider,
                             model=model,
                             api_key=api_key,
                         )
-                    except Exception as e:
-                        log.exception(
-                            "orch.error: %s zone %s failed - %s",
-                            intent,
+                        prov = provider or ""
+                        mod = model or ""
+                    except Exception as agent_err:
+                        log.warning(
+                            "orch.warning: zone_agent failed zone=%s, "
+                            "falling back to _edit_zone_latex - %s",
                             n,
-                            e,
+                            agent_err,
                         )
-                        summaries.append(f"Zone {n} {intent} failed: {e}")
-                        continue
+                        try:
+                            content, summary, prov, mod = _edit_zone_latex(
+                                zone_no=n,
+                                description=z.description,
+                                current=current,
+                                digest=digest,
+                                user_message=user_message,
+                                is_fill=(intent == "fill"),
+                                provider=provider,
+                                model=model,
+                                api_key=api_key,
+                            )
+                        except Exception as e:
+                            log.exception(
+                                "orch.error: %s zone %s fallback failed - %s",
+                                intent,
+                                n,
+                                e,
+                            )
+                            summaries.append(
+                                f"Zone {n} {intent} failed: {e}"
+                            )
+                            continue
                     used_provider, used_model = prov, mod
                     doc.set_zone_inner(n, content)
                     changed.append(str(n))
