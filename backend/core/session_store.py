@@ -39,10 +39,15 @@ class ChatSession(BaseModel):
     source_url: Optional[str] = None
     project_dir: Optional[str] = None
     setup_complete: bool = False
+    # Rollback snapshot — written before every orchestrator turn
+    zones_snapshot: List[Dict[str, Any]] = Field(default_factory=list)
+    latex_code_snapshot: str = ""
+    header_snapshot: str = ""
+    footer_snapshot: str = ""
     created_at: str = Field(default_factory=_utcnow)
     updated_at: str = Field(default_factory=_utcnow)
     active_provider: str = "groq"
-    active_model: str = "llama-3.3-70b-versatile"
+    active_model: str = "llama-3.1-8b-instant"
     messages: List[ChatMessageRecord] = Field(default_factory=list)
 
 
@@ -176,6 +181,55 @@ class SessionStore:
     def set_latex(self, session: ChatSession, latex_code: str) -> ChatSession:
         session.latex_code = latex_code
         return self.save(session)
+
+
+def take_snapshot(
+    session: ChatSession, store: "SessionStore"
+) -> None:
+    """Persist a rollback snapshot before an orchestrator edit turn.
+
+    Writes the current good state into ``zones_snapshot``,
+    ``latex_code_snapshot``, ``header_snapshot``, and ``footer_snapshot``
+    and immediately saves to disk.  If the subsequent compile fails the
+    session can be restored via :func:`rollback_to_snapshot`.
+
+    Args:
+        session: The active :class:`ChatSession`.
+        store: The :class:`SessionStore` instance to persist with.
+    """
+    session.zones_snapshot = [
+        dict(z) for z in (session.zones or [])
+    ]
+    session.latex_code_snapshot = session.latex_code
+    session.header_snapshot = session.header
+    session.footer_snapshot = session.footer
+    store.save(session)
+
+
+def rollback_to_snapshot(
+    session: ChatSession, store: "SessionStore"
+) -> bool:
+    """Restore session zones from the pre-edit snapshot.
+
+    Should be called when Tectonic compilation fails after an orchestrator
+    edit so the user is not left with a permanently broken session.
+
+    Args:
+        session: The active :class:`ChatSession`.
+        store: The :class:`SessionStore` instance to persist with.
+
+    Returns:
+        ``True`` if a valid snapshot existed and was restored,
+        ``False`` if no snapshot was available.
+    """
+    if not session.zones_snapshot and not session.latex_code_snapshot:
+        return False
+    session.zones = list(session.zones_snapshot)
+    session.latex_code = session.latex_code_snapshot
+    session.header = session.header_snapshot
+    session.footer = session.footer_snapshot
+    store.save(session)
+    return True
 
 
 session_store = SessionStore()

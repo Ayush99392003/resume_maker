@@ -31,7 +31,10 @@ _ZONE_END = re.compile(
     r"^%\s*ZONE:(?P<id>[A-Za-z0-9_]+):END\s*$", re.MULTILINE
 )
 
-# Parse a tectonic/pdflatex error line reference like "resume.tex:164:"
+# Parse a tectonic/pdflatex error line reference
+_REAL_ERROR_LINE_RE = re.compile(
+    r"(?:error|fatal error|!)\s*.*\.tex:(\d+):", re.IGNORECASE
+)
 _ERR_LINE_RE = re.compile(r"\.tex:(\d+):")
 
 
@@ -98,26 +101,18 @@ def _zone_containing_line(
 
 def _context_window(
     line_index: Dict[int, str],
-    center_lines: List[int],
-    padding: int = 5,
+    line_numbers: List[int],
+    padding: int = 6,
 ) -> Dict[int, str]:
-    """Return a windowed subset of the line index around *center_lines*.
-
-    Args:
-        line_index: Full line-indexed mapping.
-        center_lines: Error line numbers to centre the window on.
-        padding: Number of context lines to include on each side.
-
-    Returns:
-        Subset mapping ``{lineno: content}``.
-    """
-    include: set[int] = set()
-    for ln in center_lines:
-        for offset in range(-padding, padding + 1):
-            candidate = ln + offset
-            if candidate in line_index:
-                include.add(candidate)
-    return {ln: line_index[ln] for ln in sorted(include)}
+    """Return line dict sliced to [min_err - padding, max_err + padding]."""
+    if not line_numbers or not line_index:
+        return {}
+    all_lines = sorted(line_index.keys())
+    min_avail = all_lines[0]
+    max_avail = all_lines[-1]
+    start = max(min_avail, min(line_numbers) - padding)
+    end = min(max_avail, max(line_numbers) + padding)
+    return {ln: line_index[ln] for ln in range(start, end + 1) if ln in line_index}
 
 
 def build_debug_payload(
@@ -146,9 +141,14 @@ def build_debug_payload(
     line_index = build_line_index(latex)
     err_lines = _error_line_numbers(error_log)
 
-    # Infer zone if not supplied
+    # Infer zone if not supplied: check error lines from last to first
+    # because fatal errors that halted TeX appear at the bottom of the log.
     if zone_id is None and err_lines:
-        zone_id = _zone_containing_line(latex, err_lines[0])
+        for ln in reversed(err_lines):
+            found = _zone_containing_line(latex, ln)
+            if found:
+                zone_id = found
+                break
 
     # Get zone range
     zone_rng: Optional[Tuple[int, int]] = None

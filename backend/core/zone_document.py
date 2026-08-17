@@ -249,31 +249,57 @@ def sync_session_from_document(session: Any, doc: ZoneDocument) -> None:
 
 
 def document_from_session(session: Any) -> Optional[ZoneDocument]:
-    """Rebuild ZoneDocument from session fields, or None if not set up."""
+    """Rebuild ZoneDocument from session fields, or None if not set up.
+
+    Handles the case where the stored ``header`` does not contain
+    ``\\begin{document}`` by extracting the preamble from ``latex_code``
+    rather than re-parsing the entire assembled document (which would
+    renumber all zones from 1, breaking orchestrator zone-no references).
+    """
     zones_raw = getattr(session, "zones", None) or []
     header = getattr(session, "header", None) or ""
     footer = getattr(session, "footer", None) or ""
     order = getattr(session, "zone_order", None) or []
     if not header and not zones_raw:
         return None
+    # Repair missing \begin{document} in header without re-parsing the
+    # entire document (which renumbers zones).
     if zones_raw and "\\begin{document}" not in header:
         latex = getattr(session, "latex_code", None) or ""
-        if "\\begin{document}" in latex:
-            try:
-                from .latex_to_zones import latex_to_zones
+        begin_idx = latex.find("\\begin{document}")
+        if begin_idx != -1:
+            eol = latex.find("\n", begin_idx)
+            repaired_header = (
+                latex[: eol + 1] if eol != -1
+                else latex[: begin_idx + len("\\begin{document}")] + "\n"
+            )
+            header = repaired_header
+        elif "\\begin{document}" in latex:
+            # Fallback: full re-parse only when zones_raw is empty/corrupt
+            if not zones_raw:
+                try:
+                    from .latex_to_zones import latex_to_zones
 
-                return latex_to_zones(
-                    latex, source_url=getattr(session, "source_url", None)
-                )
-            except Exception:
-                pass
-    zones = [ZoneRecord(**z) if isinstance(z, dict) else z for z in zones_raw]
+                    return latex_to_zones(
+                        latex,
+                        source_url=getattr(session, "source_url", None),
+                    )
+                except Exception:
+                    pass
+    zones = [
+        ZoneRecord(**z) if isinstance(z, dict) else z
+        for z in zones_raw
+    ]
     return ZoneDocument(
         header=header,
         footer=footer,
         zones=zones,
-        zone_order=list(order) if order else [z.zone_no for z in zones],
-        next_zone_no=getattr(session, "next_zone_no", None)
-        or (max([z.zone_no for z in zones], default=0) + 1),
+        zone_order=(
+            list(order) if order else [z.zone_no for z in zones]
+        ),
+        next_zone_no=(
+            getattr(session, "next_zone_no", None)
+            or (max([z.zone_no for z in zones], default=0) + 1)
+        ),
         source_url=getattr(session, "source_url", None),
     )
