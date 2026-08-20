@@ -1,43 +1,56 @@
-# Dependencies
+# Dependencies and Virtual Environments
+__pycache__/
+*.py[cod]
+*$py.class
 node_modules/
-**/__pycache__/
-*.pyc
 backend/.venv/
 backend/venv/
 .venv/
 venv/
+ENV/
 
-# Environment variables
+# Environment Variables and Secrets
 .env
-.env.local
+.env.*
+!.env.template
+!.env.example
 
-# Durable chat sessions
+# Durable chat sessions and local profile data
 backend/data/
+data/
 
 # Local Tectonic binary & font configs (downloadable/generated)
 backend/bin/
 backend/etc/
 backend/fonts/
 
-# Build outputs & temporary files
+# Build outputs & generated documents
 dist/
 build/
+output/
+outputs/
 *.pdf
-*.log
 *.aux
 *.out
+*.fls
+*.fdb_latexmk
+*.synctex.gz
 _tmp_*
 backend/_tmp_*
 
-# IDEs & Test Caches
+# Logs and runtime data
+*.log
+logs/
+backend/logs/
+
+# IDEs, OS & Test Artifacts
 .vscode/
 .idea/
+.DS_Store
+Thumbs.db
 .pytest_cache/
 .coverage
 coverage/
+htmlcov/
 *.sqlite
 *.db
-
-# Docker
-.dockerignore
-# (Wait, .dockerignore itself is usually tracked, but maybe some temp docker files aren't)

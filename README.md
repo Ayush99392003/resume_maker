@@ -7,11 +7,12 @@ Chat-first, agentic resume builder: AI fills **dynamic LaTeX zones**, you iterat
 ## 🚀 Key Features
 
 - **Auth + Profile Key Store**: Register/login with local profile persistence (`auth_store.py`). Provider API keys stored server-side and never echoed raw to UI.
-- **Overleaf Import & TeX Softener**: Paste any public Overleaf gallery or GitHub LaTeX resume URL (`overleaf_import.py`). The TeX softener ([`latex_soften.py`](file:///c:/Users/ayush/Pictures/Resume_Maker/resume_maker/backend/core/latex_soften.py)) converts crashy XeTeX/Font Awesome packages for seamless Windows Tectonic compilation.
-- **Hierarchical Agentic Architecture**: Chat Router classifies prompt intent → Orchestrator plans steps → Zone Specialist Agents edit target zones (`HEADER`, `SUMMARY`, `EXPERIENCE`, `EDUCATION`, `SKILLS`).
+- **Overleaf Import & TeX Softener**: Paste any public Overleaf gallery or GitHub LaTeX resume URL (`overleaf_import.py`). The TeX softener ([`latex_soften.py`](file:///c:/Users/ayush/Pictures/Resume_Maker/resume_maker/backend/core/latex_soften.py)) converts crashy XeTeX/Font Awesome packages and normalizes Unicode characters for seamless Windows Tectonic compilation.
+- **Hierarchical Agentic Architecture**: Chat Router classifies prompt intent → Orchestrator plans steps → Zone Specialist Agents edit target zones (`HEADER`, `SUMMARY`, `EXPERIENCE`, `EDUCATION`, `SKILLS`, `PROJECTS`).
 - **Dynamic Numbered Zones**: `% ZONE:NAME:START` and `% ZONE:NAME:END` markers keep preamble, styling, and page layout fixed while agents safely edit section contents.
-- **Multi-Provider LLM Router**: Explicit provider and model routing across `groq`, `openai`, `gemini`, `anthropic`, `azure`, and `aws`.
-- **Soft-Fail Compilation**: Tectonic errors trigger up to 2 auto-fix retries ([`ai_agent.py`](file:///c:/Users/ayush/Pictures/Resume_Maker/resume_maker/backend/core/ai_agent.py)). Non-fatal syntax issues preserve session state and display clear compile notes.
+- **Pydantic Guardrails & Context-Aware Escaping**: Auto-escapes LaTeX special characters (`&`, `$`, `^`, `~`, `%`, `_`, `#`) without breaking math mode, while token-aware parsers prevent macro corruption.
+- **Macro Fallback Resilience**: Built-in fallback stubs for `\cventry`, `\cvitem`, `\degree`, `\school`, `\resumeSubheading`, and custom list macros (`\resumeItemListStart`) ensure multi-template compatibility.
+- **Atomic Session Snapshots & Soft-Fail Rollback**: Sessions snapshot prior to edits; if Tectonic fails compilation, session state cleanly rolls back to the last-known good render.
 - **ATS Keyword & Embedding Scorer**: Hybrid keyword match + vector embedding cosine similarity using Google Gemini (`ats_scorer.py`).
 
 ---
@@ -23,10 +24,11 @@ frontend (React / Vite on :3000)
     ↓ API Proxy (/api -> http://localhost:8001)
 FastAPI Backend (backend/main.py on :8001)
     ├── auth_store (Profiles, Tokens & Keys)
-    ├── session_store (Chat History & Zone Documents)
+    ├── session_store (Chat History & Zone Documents with Snapshots)
     ├── chat_router & orchestrator (Intent Routing & Step Planning)
-    ├── zone_agents (Header, Summary, Experience, Education, Skills)
-    ├── latex_soften (TeX Package & Macro Compatibility Transformer)
+    ├── zone_agents (Header, Summary, Experience, Education, Skills, Projects)
+    ├── latex_soften (TeX Package, Unicode & Macro Compatibility Transformer)
+    ├── line_indexer (Bottom-Up Error Localization for AI Fixer)
     ├── llm_router (OpenAI, Groq, Gemini, Anthropic, Azure, AWS Bedrock)
     └── compiler (Windows Tectonic CLI Compiler & Auto-Fixer Loop)
 ```
@@ -50,7 +52,7 @@ Copy `.env.template` → `.env`:
 
 ```env
 LLM_PROVIDER=groq
-MODEL_NAME=llama-3.3-70b-versatile
+MODEL_NAME=openai/gpt-oss-120b
 GROQ_API_KEY=your_key_here
 ```
 
@@ -69,6 +71,20 @@ npm run dev
 
 - **Frontend Application**: `http://localhost:3000`
 - **Backend API Docs**: `http://localhost:8001/docs`
+
+---
+
+## 🧪 Testing
+
+Run the comprehensive test suite with `uv`:
+
+```powershell
+# Run all unit and integration tests
+backend\.venv\Scripts\pytest.exe tests\ -v
+
+# Run 5-change E2E live pipeline verification
+backend\.venv\Scripts\python.exe tests\test_e2e_5_changes.py
+```
 
 ---
 
