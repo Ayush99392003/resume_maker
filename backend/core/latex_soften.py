@@ -179,6 +179,12 @@ def soften_latex_for_tectonic(latex: str) -> Tuple[str, List[str]]:
             src = src.replace(a, b)
             changes.append(f"replaced {a} -> {b}")
 
+    # Strip [pdftex] driver option from \usepackage[pdftex]{hyperref} for Tectonic/XeTeX compatibility
+    src2, n_hyp = re.subn(r"\\usepackage\[[^\]]*pdftex[^\]]*\]\{hyperref\}", r"\\usepackage{hyperref}", src)
+    if n_hyp:
+        src = src2
+        changes.append("removed [pdftex] driver option from hyperref package")
+
     # Auto-repair stripped \esume macros from legacy session state
     if r"\esume" in src:
         src, n = re.subn(r"\\esume([A-Za-z])", r"\\resume\1", src)
