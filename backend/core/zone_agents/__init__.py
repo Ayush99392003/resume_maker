@@ -149,7 +149,8 @@ def _escape_raw_latex_chars(text: str) -> str:
 
     Escapes ``%``, ``_``, ``#``, ``&``, ``$``, ``^``, ``~`` that are
     NOT already escaped (preceded by ``\\``) and are NOT inside a
-    genuine ``$...$`` inline math region or a LaTeX comment.
+    genuine ``$...$`` inline math region, LaTeX comment, or tabular
+    alignment environment.
 
     Args:
         text: LaTeX fragment from the LLM.
@@ -162,8 +163,15 @@ def _escape_raw_latex_chars(text: str) -> str:
     n = len(text)
     math_end_idx = -1
     prev_backslash = False
+    tabular_depth = 0
 
     while i < n:
+        # Track tabular environment boundaries so column & alignment is preserved
+        if text[i:].startswith(r"\begin{tabular") or text[i:].startswith(r"\begin{tabular*"):
+            tabular_depth += 1
+        elif text[i:].startswith(r"\end{tabular") or text[i:].startswith(r"\end{tabular*"):
+            tabular_depth = max(0, tabular_depth - 1)
+
         ch = text[i]
 
         if prev_backslash:
@@ -209,6 +217,13 @@ def _escape_raw_latex_chars(text: str) -> str:
             i = eol + 1
             continue
 
+        if ch == '&':
+            # Do NOT escape & if inside a tabular alignment environment
+            if tabular_depth > 0:
+                result.append(ch)
+                i += 1
+                continue
+
         replacement = _LATEX_ESCAPABLE.get(ch)
         if replacement is not None:
             result.append(replacement)
@@ -240,18 +255,30 @@ def _sanitize_tex_json(obj: Any) -> Any:
 
 def _extract_json(text: str) -> dict:
     text = (text or "").strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    # Pre-escape invalid bare backslashes before parsing
-    text = _pre_escape_backslashes(text)
+    # Strip markdown fences anywhere in the string
+    if "```" in text:
+        match_code = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if match_code:
+            text = match_code.group(1).strip()
+        else:
+            text = re.sub(r"^.*?```(?:json)?\s*", "", text, flags=re.DOTALL)
+            text = re.sub(r"\s*```.*?$", "", text, flags=re.DOTALL).strip()
+
+    # Try parsing raw JSON first
     try:
         return _sanitize_tex_json(json.loads(text))
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            return _sanitize_tex_json(json.loads(match.group(0)))
-        raise
+    except Exception:
+        pass
+
+    # Extract JSON object substring {...}
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    candidate = match.group(0) if match else text
+
+    try:
+        return _sanitize_tex_json(json.loads(candidate))
+    except Exception:
+        sanitized = _pre_escape_backslashes(candidate)
+        return _sanitize_tex_json(json.loads(sanitized))
 
 
 
@@ -348,19 +375,22 @@ class ZoneAgent:
             f"You are the {self.role} for a LaTeX resume.\n"
             f"You ONLY edit the {self.zone_id} zone. Never return a full "
             f"document, preamble, or zone markers.\n"
-            f"CRITICAL: If using \\item bullets, you MUST enclose them within "
-            f"a valid list environment like \\begin{{itemize}} ... "
-            f"\\end{{itemize}} (or the template's designated list macro). "
-            f"Never return bare \\item lines outside a list environment.\n"
-            f"Preserve all custom command styles, alignment, spacing, and "
-            f"formatting structure present in the original zone.\n"
+            f"CRITICAL STRUCTURAL RULES:\n"
+            f"1. PRESERVE TEMPLATE MACROS: Inspect the current zone content carefully. "
+            f"If the current zone uses custom template macros (such as \\resumeSubheading, \\resumeItem, "
+            f"\\resumeSubItem, \\resumeSubHeadingListStart, \\resumeItemListStart, \\cventry, \\cvitem), "
+            f"YOU MUST USE THOSE EXACT MACROS for new or edited entries. Never downgrade or replace them with generic unstyled commands.\n"
+            f"2. TABULAR ALIGNMENT: In multi-column tabular environments (e.g. \\begin{{tabular*}} ... \\end{{tabular*}}), "
+            f"use bare `&` to separate columns and `\\\\` to end rows.\n"
+            f"3. LIST ENVIRONMENTS: If using \\item bullets, you MUST enclose them within a valid list environment "
+            f"like \\begin{{itemize}} ... \\end{{itemize}} or the template's designated list macro (e.g. \\resumeItemListStart).\n"
             f"Return your answer as a JSON object containing 'content' "
             f"and 'summary' fields.\n\n"
             f"--- EXAMPLES ---\n"
-            f"Example 1: Adding a skills item\n"
+            f"Example 1: Adding a skills item with custom macro\n"
             f"Request: Add Python, Java to Skills\n"
             f"Response JSON: {{\n"
-            f"  \"content\": \"Python, Java\",\n"
+            f"  \"content\": \"\\\\resumeSubItem{{Languages}}{{Python, Java}}\",\n"
             f"  \"summary\": \"Added Python and Java to skills.\"\n"
             f"}}\n\n"
             f"Example 2: Adding experience bullets\n"
@@ -443,9 +473,9 @@ class HeaderAgent(ZoneAgent):
     zone_id = "HEADER"
     role = "Header / contact specialist"
     latex_hints = (
-        "For moderncv: keep \\name{}, \\title{}, \\address{}, \\phone, "
-        "\\email, \\homepage. Replace placeholders with real data. "
-        "For article templates: keep the existing center/flushleft structure."
+        "Preserve the exact tabular/tabular* structure and columns. "
+        "Use bare `&` to separate columns and `\\\\` to end rows. "
+        "Do not escape table column `&` to `\\&`."
     )
 
 
@@ -462,12 +492,9 @@ class ExperienceAgent(ZoneAgent):
     zone_id = "EXPERIENCE"
     role = "Work experience specialist"
     latex_hints = (
-        "For standard templates (article/modern): format each job as "
-        "\\textbf{Job Title} -- Company \\hfill Dates\n"
-        "\\begin{itemize}\n"
-        "\\item Quantified achievement or responsibility.\n"
-        "\\end{itemize}\n"
-        "For moderncv templates: use \\cventry. No \\section commands."
+        "If the original zone uses custom template macros (e.g. \\resumeSubheading, \\resumeItemListStart, \\resumeItem, \\cventry), "
+        "YOU MUST USE THOSE EXACT MACROS for new or updated job entries. "
+        "Ensure all itemize or resumeItemList blocks are wrapped in \\resumeItemListStart ... \\resumeItemListEnd."
     )
 
 
@@ -475,9 +502,7 @@ class EducationAgent(ZoneAgent):
     zone_id = "EDUCATION"
     role = "Education specialist"
     latex_hints = (
-        "For standard templates: \\textbf{Degree in Field} -- University "
-        "\\hfill Years\n"
-        "For moderncv templates: use \\cventry. No \\section commands."
+        "If the original zone uses \\resumeSubheading or \\cventry, YOU MUST USE THOSE EXACT MACROS."
     )
 
 
@@ -485,8 +510,7 @@ class SkillsAgent(ZoneAgent):
     zone_id = "SKILLS"
     role = "Skills specialist"
     latex_hints = (
-        "For standard templates: \\textbf{Category}: Item 1, Item 2, Item 3\n"
-        "For moderncv templates: use \\cvitem{Category}{Items}. No \\section commands."
+        "If the original zone uses \\resumeSubItem or \\cvitem, YOU MUST USE THOSE EXACT MACROS."
     )
 
 
@@ -494,14 +518,7 @@ class ProjectsAgent(ZoneAgent):
     zone_id = "PROJECTS"
     role = "Projects specialist"
     latex_hints = (
-        "Check the preamble for custom macros. "
-        "If \\resumeProjectHeading is defined: use "
-        "\\resumeProjectHeading{{\\textbf{{Name}}}}{{Date}} then "
-        "\\resumeItemListStart / \\resumeItem{{...}} / \\resumeItemListEnd. "
-        "If \\resumeProjectHeading is NOT defined: use "
-        "\\subsection*{{Name}} + \\begin{{itemize}} \\item bullets \\end{{itemize}}. "
-        "Never invent macros that are not defined in the preamble. "
-        "No \\section commands."
+        "If the original zone uses \\resumeSubItem or \\resumeProjectHeading, YOU MUST USE THOSE EXACT MACROS."
     )
 
 ZONE_AGENT_CLASSES = {

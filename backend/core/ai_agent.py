@@ -69,6 +69,7 @@ class AgentTurnResult(BaseModel):
     reply: str
     latex_code: str
     zones_changed: List[str] = Field(default_factory=list)
+    resolved_zones: List[str] = Field(default_factory=list)
     proposals: Optional[List[ProposalVariant]] = None
     provider: str
     model: str
@@ -474,6 +475,7 @@ class AIAgent:
         latex_code: str,
         template_latex: str,
         history: List[Dict[str, Any]],
+        target_zone: Optional[str] = None,
         provider: Optional[str] = None,
         model: Optional[str] = None,
         api_key: Optional[str] = None,
@@ -486,8 +488,9 @@ class AIAgent:
         used_provider = provider or self.router.default_provider()
         used_model = model or self.router.default_model()
         log.info(
-            "agent.step: run_chat_turn first_fill=%s msg_chars=%s latex_chars=%s",
+            "agent.step: run_chat_turn first_fill=%s target_zone=%s msg_chars=%s latex_chars=%s",
             is_first_fill,
+            target_zone,
             len(user_message or ""),
             len(working or ""),
         )
@@ -514,6 +517,7 @@ class AIAgent:
         decision = classify_route(
             user_message,
             catalog=catalog,
+            target_zone=target_zone,
             provider=provider,
             model=model,
             api_key=api_key,
@@ -559,6 +563,7 @@ class AIAgent:
                 user_message=user_message,
                 document=doc,
                 is_first_fill=is_first_fill,
+                target_zone=target_zone,
                 provider=provider,
                 model=model,
                 api_key=api_key,
@@ -570,13 +575,15 @@ class AIAgent:
             sync_session_from_document(session, result.document)
 
         log.info(
-            "agent.step: orchestrator done changed=%s",
+            "agent.step: orchestrator done changed=%s resolved=%s",
             result.zones_changed,
+            result.resolved_zones,
         )
         return AgentTurnResult(
             reply=result.reply,
             latex_code=result.document.assemble(),
             zones_changed=result.zones_changed,
+            resolved_zones=result.resolved_zones,
             provider=result.provider or used_provider,
             model=result.model or used_model,
             tool_trace=[
