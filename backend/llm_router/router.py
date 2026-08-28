@@ -25,7 +25,29 @@ SUPPORTED_PROVIDERS = (
 
 
 class LLMRouter:
-    """Routes chat calls to an explicitly selected provider."""
+    """Routes chat calls to an explicitly selected provider and tracks token/call metrics."""
+
+    def __init__(self):
+        self._call_count = 0
+        self._prompt_tokens = 0
+        self._completion_tokens = 0
+
+    def get_metrics(self) -> Dict[str, int]:
+        """Return cumulative call count and token usage dict."""
+        return {
+            "call_count": self._call_count,
+            "prompt_tokens": self._prompt_tokens,
+            "completion_tokens": self._completion_tokens,
+            "total_tokens": self._prompt_tokens + self._completion_tokens,
+        }
+
+    def reset_metrics(self) -> Dict[str, int]:
+        """Reset and return previous token and call count metrics."""
+        prev = self.get_metrics()
+        self._call_count = 0
+        self._prompt_tokens = 0
+        self._completion_tokens = 0
+        return prev
 
     def default_provider(self) -> str:
         return os.getenv("LLM_PROVIDER", "groq").strip().lower()
@@ -84,12 +106,17 @@ class LLMRouter:
         model_name = (model or self.default_model()).strip()
         if not model_name:
             raise ValueError("MODEL_NAME is required")
-        return prov.chat(
+        resp = prov.chat(
             messages,
             model=model_name,
             temperature=temperature,
             response_format=response_format,
         )
+        self._call_count += 1
+        if resp.usage:
+            self._prompt_tokens += resp.usage.get("prompt_tokens", 0)
+            self._completion_tokens += resp.usage.get("completion_tokens", 0)
+        return resp
 
     def chat_model(
         self,

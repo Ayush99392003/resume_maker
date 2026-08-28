@@ -52,21 +52,34 @@ class GroqProvider(LLMProvider):
         if response_format == "json":
             kwargs["response_format"] = {"type": "json_object"}
 
-        resp = self.client.chat.completions.create(**kwargs)
-        content = resp.choices[0].message.content or ""
-        usage = {}
-        if resp.usage:
-            usage = {
-                "prompt_tokens": resp.usage.prompt_tokens,
-                "completion_tokens": resp.usage.completion_tokens,
-            }
-        return LLMResponse(
-            content=content,
-            provider=self.name,
-            model=model,
-            raw=resp,
-            usage=usage,
-        )
+        import time
+        max_attempts = 4
+        for attempt in range(max_attempts):
+            try:
+                resp = self.client.chat.completions.create(**kwargs)
+                content = resp.choices[0].message.content or ""
+                usage = {}
+                if resp.usage:
+                    usage = {
+                        "prompt_tokens": resp.usage.prompt_tokens,
+                        "completion_tokens": resp.usage.completion_tokens,
+                    }
+                return LLMResponse(
+                    content=content,
+                    provider=self.name,
+                    model=model,
+                    raw=resp,
+                    usage=usage,
+                )
+            except Exception as err:
+                err_str = str(err).lower()
+                if "response_format" in kwargs and ("json" in err_str or "400" in err_str):
+                    kwargs.pop("response_format", None)
+                    continue
+                if ("429" in err_str or "rate_limit" in err_str or "rate limit" in err_str) and attempt < max_attempts - 1:
+                    time.sleep(6.0 * (attempt + 1))
+                    continue
+                raise err
 
     def chat_model(
         self,
