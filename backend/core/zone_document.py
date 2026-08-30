@@ -188,6 +188,31 @@ class ZoneDocument(BaseModel):
             parts.append(f"[Zone {n} — {desc}] {inner}")
         return "\n".join(parts) if parts else "(no zones)"
 
+    def compact_digest(self, active_zone_no: Optional[int] = None) -> str:
+        """Generate ultra-lightweight (1-line per zone) structural context (~50-80 tokens total)."""
+        lines = []
+        for n in self.zone_order:
+            if active_zone_no is not None and n == active_zone_no:
+                continue
+            try:
+                z = self.get_zone(n)
+                inner = self.zone_inner(n).strip()
+                first_line = ""
+                for line in inner.split("\n"):
+                    line_s = line.strip()
+                    if line_s and not line_s.startswith("%") and not line_s.startswith("\\begin"):
+                        clean = re.sub(r"\\[a-zA-Z]+(\{[^}]*\})?", " ", line_s)
+                        clean = re.sub(r"[{}\\]", "", clean).strip()
+                        if clean:
+                            first_line = clean[:60]
+                            break
+                desc = z.description or z.kind or f"Zone {n}"
+                snippet = f" — {first_line}" if first_line else ""
+                lines.append(f"- Zone {n} [{desc}]{snippet}")
+            except KeyError:
+                continue
+        return "\n".join(lines) if lines else "(no other zones)"
+
 
 def ensure_full_document(latex: str) -> str:
     """Guarantee a compilable shell around zone-only fragments."""
@@ -228,10 +253,8 @@ def strip_zone_markers(latex: str, zone_no: int) -> str:
 
 def sync_session_from_document(session: Any, doc: ZoneDocument) -> None:
     """Write ZoneDocument fields + assembled latex onto a ChatSession."""
-    # Persist repaired shell back onto the document fields
     assembled = doc.assemble()
     if "\\begin{document}" not in (doc.header or ""):
-        # Keep stored header aligned with what assemble used
         begin = assembled.find("\\begin{document}")
         if begin != -1:
             end_begin = assembled.find("\n", begin)
@@ -249,21 +272,13 @@ def sync_session_from_document(session: Any, doc: ZoneDocument) -> None:
 
 
 def document_from_session(session: Any) -> Optional[ZoneDocument]:
-    """Rebuild ZoneDocument from session fields, or None if not set up.
-
-    Handles the case where the stored ``header`` does not contain
-    ``\\begin{document}`` by extracting the preamble from ``latex_code``
-    rather than re-parsing the entire assembled document (which would
-    renumber all zones from 1, breaking orchestrator zone-no references).
-    """
+    """Rebuild ZoneDocument from session fields, or None if not set up."""
     zones_raw = getattr(session, "zones", None) or []
     header = getattr(session, "header", None) or ""
     footer = getattr(session, "footer", None) or ""
     order = getattr(session, "zone_order", None) or []
     if not header and not zones_raw:
         return None
-    # Repair missing \begin{document} in header without re-parsing the
-    # entire document (which renumbers zones).
     if zones_raw and "\\begin{document}" not in header:
         latex = getattr(session, "latex_code", None) or ""
         begin_idx = latex.find("\\begin{document}")
@@ -275,7 +290,6 @@ def document_from_session(session: Any) -> Optional[ZoneDocument]:
             )
             header = repaired_header
         elif "\\begin{document}" in latex:
-            # Fallback: full re-parse only when zones_raw is empty/corrupt
             if not zones_raw:
                 try:
                     from .latex_to_zones import latex_to_zones
