@@ -81,6 +81,7 @@ class OrchResult(BaseModel):
     reply: str
     document: ZoneDocument
     zones_changed: List[str] = Field(default_factory=list)
+    resolved_zones: List[str] = Field(default_factory=list)
     tool_trace: List[Dict[str, Any]] = Field(default_factory=list)
     provider: str = ""
     model: str = ""
@@ -148,11 +149,41 @@ def plan_intents(
     doc: ZoneDocument,
     *,
     is_first_fill: bool,
+    target_zone: Optional[str] = None,
     provider: Optional[str],
     model: Optional[str],
     api_key: Optional[str],
 ) -> OrchPlan:
     catalog = doc.catalog()
+
+    # Fast-path 1: Explicit user chip selection
+    if target_zone and target_zone.strip().lower() not in ("auto", "none", ""):
+        tz_clean = target_zone.strip().lower()
+        if tz_clean in ("full_rewrite", "full rewrite", "all", "rewrite"):
+            return OrchPlan(
+                steps=[
+                    OrchStep(intent="fill", zone_nos=list(doc.zone_order)),
+                    OrchStep(intent="describe", zone_nos=list(doc.zone_order)),
+                ],
+                reason="user_target_full_rewrite",
+            )
+        matched_zone = None
+        if target_zone.strip().isdigit():
+            z_no = int(target_zone.strip())
+            if z_no in doc.zone_map():
+                matched_zone = z_no
+        if matched_zone is None:
+            matched_zone = _match_zone_by_text(doc, target_zone)
+        if matched_zone is not None:
+            log.info(
+                "orch.step: fast_path explicit target_zone=%s -> zone=%s",
+                target_zone,
+                matched_zone,
+            )
+            return OrchPlan(
+                steps=[OrchStep(intent="edit", zone_nos=[matched_zone])],
+                reason=f"user_target_{target_zone}",
+            )
 
     def _looks_unfilled() -> bool:
         if not doc.zones:
@@ -232,26 +263,42 @@ def plan_intents(
             reason="keyword_swap",
         )
 
-    if re.search(r"\b(reorder|move zone|move )\b", lower):
-        # Fall through to LLM for complex move
-        pass
+    # Fast-path 2: Unambiguous single-zone keyword match (not a zone structure change)
+    target = _match_zone_by_text(doc, message)
+    structural_kws = [
+        "reorder",
+        "swap zone",
+        "add zone",
+        "add a zone",
+        "new zone",
+        "insert zone",
+        "remove zone",
+        "delete zone",
+        "drop zone",
+        "move zone",
+    ]
+    if target is not None and not any(kw in lower for kw in structural_kws):
+        log.info(
+            "orch.step: fast_path unambiguous keyword match -> zone=%s", target
+        )
+        return OrchPlan(
+            steps=[OrchStep(intent="edit", zone_nos=[target])],
+            reason="rule_single_zone",
+        )
 
     system = (
         "You are the resume zone orchestrator planner. "
         "Zones are numbered; use zone_no from the catalog.\n"
         "Intents: fill, edit, add_zone, remove_zone, reorder, describe, clarify.\n"
-        "Return JSON:\n"
-        '{"steps":[{"intent":"edit","zone_nos":[2],'
-        '"description":"optional for add_zone",'
-        '"after_zone_no":null,"at_start":false,'
-        '"new_order":[],"swap":[]}],'
-        '"clarify":null,"reason":"..."}\n'
-        "For biodata dumps use fill on all zones then describe.\n"
-        "For pure reorder use reorder with new_order or swap [a,b].\n"
+        "Return JSON: {\"steps\":[{\"intent\":\"edit\",\"zone_nos\":[2]}],\"clarify\":null,\"reason\":\"...\"}\n"
         "If unclear which zone, set clarify and empty steps."
     )
+    catalog_lines = [
+        f"- Zone {c['zone_no']}: {c['description']} ({c['kind']})"
+        for c in catalog
+    ]
     user = (
-        f"Catalog:\n{json.dumps(catalog, indent=2)}\n\n"
+        f"Zones:\n" + "\n".join(catalog_lines) + "\n\n"
         f"Current order: {doc.zone_order}\n\n"
         f"User message:\n{message}"
     )
@@ -417,14 +464,16 @@ class Orchestrator:
         user_message: str,
         document: ZoneDocument,
         is_first_fill: bool = False,
+        target_zone: Optional[str] = None,
         provider: Optional[str] = None,
         model: Optional[str] = None,
         api_key: Optional[str] = None,
     ) -> OrchResult:
         doc = document.model_copy(deep=True)
         log.info(
-            "orch.step: plan start first_fill=%s zones=%s msg_chars=%s",
+            "orch.step: plan start first_fill=%s target_zone=%s zones=%s msg_chars=%s",
             is_first_fill,
+            target_zone,
             doc.zone_order,
             len(user_message or ""),
         )
@@ -433,6 +482,7 @@ class Orchestrator:
                 user_message,
                 doc,
                 is_first_fill=is_first_fill,
+                target_zone=target_zone,
                 provider=provider,
                 model=model,
                 api_key=api_key,
@@ -460,6 +510,7 @@ class Orchestrator:
                 reply=plan.clarify,
                 document=doc,
                 zones_changed=[],
+                resolved_zones=[],
                 tool_trace=trace,
                 provider=used_provider or "groq",
                 model=used_model or "",
@@ -568,7 +619,6 @@ class Orchestrator:
 
             if intent in ("fill", "edit"):
                 targets = step.zone_nos or list(doc.zone_order)
-                digest = doc.digest()
                 for n in targets:
                     try:
                         current = doc.zone_inner(n)
@@ -578,6 +628,9 @@ class Orchestrator:
                             "orch.error: %s unknown zone %s", intent, n
                         )
                         continue
+
+                    # Compact 1-line context for other zones to minimize prompt tokens
+                    compact_digest = doc.compact_digest(active_zone_no=n)
                     try:
                         # Primary path: validated ZoneAgent (Pydantic + retry)
                         content, summary = zone_agent_router.run_zone(
@@ -585,7 +638,7 @@ class Orchestrator:
                             zone_description=z.description,
                             zone_kind=z.kind,
                             current_zone=current,
-                            full_digest=digest,
+                            full_digest=compact_digest,
                             user_message=user_message,
                             is_initial=(intent == "fill"),
                             provider=provider,
@@ -606,7 +659,7 @@ class Orchestrator:
                                 zone_no=n,
                                 description=z.description,
                                 current=current,
-                                digest=digest,
+                                digest=compact_digest,
                                 user_message=user_message,
                                 is_fill=(intent == "fill"),
                                 provider=provider,
@@ -652,10 +705,20 @@ class Orchestrator:
             changed,
             len(reply),
         )
+
+        resolved_names: List[str] = []
+        zmap = doc.zone_map()
+        for zid in changed:
+            if zid.isdigit() and int(zid) in zmap:
+                resolved_names.append(zmap[int(zid)].description or f"Zone {zid}")
+            else:
+                resolved_names.append(str(zid))
+
         return OrchResult(
             reply=reply,
             document=doc,
             zones_changed=changed,
+            resolved_zones=resolved_names,
             tool_trace=trace,
             provider=used_provider or provider or "groq",
             model=used_model or model or "",

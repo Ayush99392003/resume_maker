@@ -259,6 +259,10 @@ class ZoneOrderRequest(BaseModel):
 class ChatRequest(BaseModel):
     session_id: str
     message: str
+    target_zone: Optional[str] = Field(
+        default="auto",
+        description="Target zone identifier (e.g. 'auto', 'HEADER', 'SKILLS', etc.)",
+    )
     provider: Optional[str] = None
     model: Optional[str] = None
     template_name: Optional[str] = None
@@ -1418,6 +1422,7 @@ async def chat(
             latex_code=session.latex_code,
             template_latex=template,
             history=history,
+            target_zone=req.target_zone,
             provider=provider,
             model=model,
             api_key=api_key,
@@ -1425,9 +1430,10 @@ async def chat(
             session=session,
         )
         log.info(
-            "chat.step: agent done route=%s zones_changed=%s reply_chars=%s",
+            "chat.step: agent done route=%s zones_changed=%s resolved=%s reply_chars=%s",
             result.route,
             result.zones_changed,
+            result.resolved_zones,
             len(result.reply or ""),
         )
     except Exception as e:
@@ -1510,6 +1516,7 @@ async def chat(
 
     meta: Dict[str, Any] = {
         "zones_changed": result.zones_changed,
+        "resolved_zones": result.resolved_zones,
         "tool_trace": result.tool_trace,
         "route": result.route,
     }
@@ -1532,6 +1539,7 @@ async def chat(
         "latex_code": session.latex_code,
         "pdf_base64": pdf_b64,
         "zones_changed": result.zones_changed,
+        "resolved_zones": result.resolved_zones,
         "proposals": proposal_payload,
         "provider": result.provider,
         "model": result.model,

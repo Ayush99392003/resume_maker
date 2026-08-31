@@ -46,16 +46,29 @@ _HELP_PAT = re.compile(
 )
 
 _RESUME_HINTS = re.compile(
-    r"\b(zone\s*\d+|experience|education|skills?|summary|projects?|"
-    r"certificat|language|award|publication|extracurricular|bio|"
-    r"resume|cv|reorder|swap|add zone|remove zone|delete zone|"
-    r"move|section|compile|latex|bullet|job|company|university)\b",
+    r"\b(zone\s*\d+|header|contact|phone|email|location|portfolio|linkedin|github|address|"
+    r"experience|education|skills?|summary|projects?|certificat|language|award|publication|"
+    r"extracurricular|bio|resume|cv|reorder|swap|add zone|remove zone|delete zone|move|"
+    r"section|compile|latex|bullet|job|company|university|update|edit|change|add|set)\b",
     re.I,
 )
 
 
-def _rule_route(message: str, *, zones_empty: bool) -> Optional[RouteDecision]:
+def _rule_route(
+    message: str,
+    *,
+    zones_empty: bool,
+    target_zone: Optional[str] = None,
+) -> Optional[RouteDecision]:
     text = (message or "").strip()
+
+    # Explicit user target zone chip selection -> instant orchestrator fast-path
+    if target_zone and target_zone.strip().lower() not in ("auto", "none", ""):
+        return RouteDecision(
+            route="orchestrator",
+            reason=f"target_zone_{target_zone.strip()}",
+        )
+
     if not text:
         return RouteDecision(
             route="direct_reply",
@@ -102,6 +115,7 @@ def classify_route(
     message: str,
     *,
     catalog: Optional[List[Dict[str, Any]]] = None,
+    target_zone: Optional[str] = None,
     provider: Optional[str] = None,
     model: Optional[str] = None,
     api_key: Optional[str] = None,
@@ -111,7 +125,9 @@ def classify_route(
     zones_empty = not catalog or all(
         not (c.get("description") or "").strip() for c in (catalog or [])
     )
-    ruled = _rule_route(message, zones_empty=zones_empty)
+    ruled = _rule_route(
+        message, zones_empty=zones_empty, target_zone=target_zone
+    )
     if ruled is not None:
         log.info(
             "route.step: rule → %s reason=%s msg_chars=%s",
