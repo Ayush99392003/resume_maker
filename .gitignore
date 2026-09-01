@@ -38,19 +38,23 @@ outputs/
 _tmp_*
 backend/_tmp_*
 
-# Logs and runtime data
-*.log
-logs/
-backend/logs/
-
-# IDEs, OS & Test Artifacts
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db
+# Test Results & Artifacts
+test_results/
+tests/test_results/
 .pytest_cache/
 .coverage
 coverage/
 htmlcov/
 *.sqlite
 *.db
+
+# Logs and runtime data
+*.log
+logs/
+backend/logs/
+
+# IDEs, OS & System
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

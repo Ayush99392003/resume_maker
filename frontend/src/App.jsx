@@ -80,6 +80,7 @@ export default function App() {
   const [setupLoading, setSetupLoading] = useState(false);
   const [setupError, setSetupError] = useState('');
   const [setupCustomDesc, setSetupCustomDesc] = useState('');
+  const [selectedTargetZone, setSelectedTargetZone] = useState('auto');
   const [compileNote, setCompileNote] = useState('');
   const [compatNote, setCompatNote] = useState('');
   const [autoSyncing, setAutoSyncing] = useState(false);
@@ -593,6 +594,8 @@ export default function App() {
     }
     const sid = sessionId;
     const text = inputValue;
+    const targetZoneToSend = selectedTargetZone;
+    setSelectedTargetZone('auto'); // Reset for next interaction
     setInputValue('');
     setMessages(prev => [...prev, { role: 'user', content: text }]);
     setLoading(true);
@@ -600,6 +603,7 @@ export default function App() {
       const resp = await axios.post(`${API_BASE}/chat`, {
         session_id: sid,
         message: text,
+        target_zone: targetZoneToSend,
         template_name: selectedTemplate,
         ...llmPayload(),
       });
@@ -614,7 +618,10 @@ export default function App() {
         content: resp.data.reply,
         provider: resp.data.provider,
         model: resp.data.model,
-        meta: { zones_changed: resp.data.zones_changed },
+        meta: {
+          zones_changed: resp.data.zones_changed,
+          resolved_zones: resp.data.resolved_zones,
+        },
       };
       if (resp.data.proposals) {
         msg.type = 'proposal';
@@ -1187,12 +1194,24 @@ export default function App() {
                     }`}
                   >
                     {m.content}
-                    {m.role === 'assistant' && (m.provider || m.meta?.zones_changed?.length) ? (
-                      <p className="mt-2 text-[10px] opacity-60">
-                        {[m.provider, m.model].filter(Boolean).join(' · ')}
-                        {m.meta?.zones_changed?.length ? ` · ${m.meta.zones_changed.join(', ')}` : ''}
-                      </p>
-                    ) : null}
+                    {m.role === 'assistant' && (
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px]">
+                        {m.meta?.resolved_zones?.length ? (
+                          <span className="inline-flex items-center gap-1 rounded bg-accent/15 px-1.5 py-0.5 font-medium text-accent">
+                            🏷️ Editing: {m.meta.resolved_zones.join(', ')}
+                          </span>
+                        ) : m.meta?.zones_changed?.length ? (
+                          <span className="inline-flex items-center gap-1 rounded bg-accent/15 px-1.5 py-0.5 font-medium text-accent">
+                            🏷️ Zones: {m.meta.zones_changed.join(', ')}
+                          </span>
+                        ) : null}
+                        {(m.provider || m.model) && (
+                          <span className="opacity-60">
+                            {[m.provider, m.model].filter(Boolean).join(' · ')}
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
                 {m.type === 'proposal' && m.variants && (
@@ -1219,20 +1238,86 @@ export default function App() {
             <div ref={chatEndRef} />
           </div>
 
-          <div className="border-t border-ink-200 p-3 space-y-2">
-            <button
-              onClick={handleSqueeze}
-              disabled={loading || !latexCode}
-              className="w-full h-8 rounded-md border border-ink-200 text-xs font-medium text-ink-700 hover:bg-ink-50 disabled:opacity-40 flex items-center justify-center gap-1.5"
-            >
-              <Layers size={13} /> Tighten layout
-            </button>
+          <div className="border-t border-ink-200 p-3 space-y-2.5 bg-white">
+            {/* Target Section Chip Selector */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs no-scrollbar">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-400 shrink-0">
+                Target:
+              </span>
+              <button
+                type="button"
+                onClick={() => setSelectedTargetZone('auto')}
+                className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                  selectedTargetZone === 'auto'
+                    ? 'bg-accent text-white shadow-sm'
+                    : 'bg-ink-100 text-ink-600 hover:bg-ink-200'
+                }`}
+              >
+                Auto
+              </button>
+              {zoneCatalog.length > 0 ? (
+                zoneCatalog.map((z) => {
+                  const label = z.description || `Zone ${z.zone_no}`;
+                  const isSel = selectedTargetZone === String(z.zone_no) || selectedTargetZone === label;
+                  return (
+                    <button
+                      key={z.zone_no}
+                      type="button"
+                      onClick={() => setSelectedTargetZone(isSel ? 'auto' : String(z.zone_no))}
+                      className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                        isSel
+                          ? 'bg-accent text-white shadow-sm'
+                          : 'bg-ink-100 text-ink-600 hover:bg-ink-200'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  );
+                })
+              ) : (
+                ['Header', 'Education', 'Skills', 'Experience', 'Projects'].map((sec) => {
+                  const isSel = selectedTargetZone.toLowerCase() === sec.toLowerCase();
+                  return (
+                    <button
+                      key={sec}
+                      type="button"
+                      onClick={() => setSelectedTargetZone(isSel ? 'auto' : sec.toLowerCase())}
+                      className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                        isSel
+                          ? 'bg-accent text-white shadow-sm'
+                          : 'bg-ink-100 text-ink-600 hover:bg-ink-200'
+                      }`}
+                    >
+                      {sec}
+                    </button>
+                  );
+                })
+              )}
+              <button
+                type="button"
+                onClick={() => setSelectedTargetZone(selectedTargetZone === 'full_rewrite' ? 'auto' : 'full_rewrite')}
+                className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                  selectedTargetZone === 'full_rewrite'
+                    ? 'bg-amber-600 text-white shadow-sm'
+                    : 'bg-amber-50 text-amber-800 border border-amber-200/60 hover:bg-amber-100'
+                }`}
+              >
+                Full Rewrite
+              </button>
+            </div>
+
             <div className="flex gap-2">
               <input
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleChat()}
-                placeholder={messages.some((m) => m.role === 'user') ? 'Ask for an edit…' : 'Paste your bio to start…'}
+                placeholder={
+                  selectedTargetZone !== 'auto'
+                    ? `Instruct change for ${selectedTargetZone}…`
+                    : messages.some((m) => m.role === 'user')
+                      ? 'Ask for an edit…'
+                      : 'Paste your bio to start…'
+                }
                 className="flex-1 h-11 rounded-md border border-ink-200 px-3 text-sm outline-none focus:border-accent"
               />
               <button
@@ -1243,6 +1328,13 @@ export default function App() {
                 <Send size={16} />
               </button>
             </div>
+            <button
+              onClick={handleSqueeze}
+              disabled={loading || !latexCode}
+              className="w-full h-7 rounded text-[11px] font-medium text-ink-500 hover:bg-ink-50 disabled:opacity-40 flex items-center justify-center gap-1.5"
+            >
+              <Layers size={12} /> Tighten layout
+            </button>
           </div>
           </>
           )}

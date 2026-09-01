@@ -1,19 +1,29 @@
 # AI LaTeX Resume Maker
 
-Chat-first, agentic resume builder: AI fills **dynamic LaTeX zones**, you iterate in chat, and the right panel toggles **Code / Render**. Multi-provider LLM routing (Groq, OpenAI, Gemini, Anthropic, Azure, AWS Bedrock) with durable sessions, login/profile API keys, and mid-chat model switching.
+Chat-first, agentic resume builder: AI fills and refines **dynamic LaTeX zones**, you iterate in conversation, and the right panel toggles live **Code / Render**. Features multi-provider LLM routing (Groq, OpenAI, Gemini, Anthropic, Azure, AWS Bedrock) with durable sessions, local profile keys, interactive section chips, and an **86.6% token-optimized zone architecture**.
 
 ---
 
 ## 🚀 Key Features
 
-- **Auth + Profile Key Store**: Register/login with local profile persistence (`auth_store.py`). Provider API keys stored server-side and never echoed raw to UI.
-- **Overleaf Import & TeX Softener**: Paste any public Overleaf gallery or GitHub LaTeX resume URL (`overleaf_import.py`). The TeX softener ([`latex_soften.py`](file:///c:/Users/ayush/Pictures/Resume_Maker/resume_maker/backend/core/latex_soften.py)) converts crashy XeTeX/Font Awesome packages and normalizes Unicode characters for seamless Windows Tectonic compilation.
-- **Hierarchical Agentic Architecture**: Chat Router classifies prompt intent → Orchestrator plans steps → Zone Specialist Agents edit target zones (`HEADER`, `SUMMARY`, `EXPERIENCE`, `EDUCATION`, `SKILLS`, `PROJECTS`).
-- **Dynamic Numbered Zones**: `% ZONE:NAME:START` and `% ZONE:NAME:END` markers keep preamble, styling, and page layout fixed while agents safely edit section contents.
-- **Pydantic Guardrails & Context-Aware Escaping**: Auto-escapes LaTeX special characters (`&`, `$`, `^`, `~`, `%`, `_`, `#`) without breaking math mode, while token-aware parsers prevent macro corruption.
-- **Macro Fallback Resilience**: Built-in fallback stubs for `\cventry`, `\cvitem`, `\degree`, `\school`, `\resumeSubheading`, and custom list macros (`\resumeItemListStart`) ensure multi-template compatibility.
-- **Atomic Session Snapshots & Soft-Fail Rollback**: Sessions snapshot prior to edits; if Tectonic fails compilation, session state cleanly rolls back to the last-known good render.
-- **ATS Keyword & Embedding Scorer**: Hybrid keyword match + vector embedding cosine similarity using Google Gemini (`ats_scorer.py`).
+- **86.6% Token-Optimized Zone Architecture**:
+  - **Compact Document Digest (`compact_digest`)**: Strips non-target raw LaTeX bloat down to a 1-line structural map (~50–80 tokens context vs. ~3,500 raw tokens).
+  - **Fast-Path Specialist Routing**: Direct rule and chip matching routes straight to specialist agents in **1 single LLM call** (~1,270 tokens total vs. ~9,500 across previous 3-agent cascades).
+- **Interactive Section Selector UX**:
+  - Quick-pick chips above the chat input bar (`Auto`, `Header`, `Education`, `Skills`, `Experience`, `Projects`, `Full Rewrite`).
+  - Atomic payload transmission with automatic reset to `Auto`.
+  - Resolved zone feedback badges displayed directly on assistant chat bubbles (e.g. `🏷️ Editing: Skills Summary`).
+- **Sequential Multi-Zone Execution**:
+  - Sequential specialist LLM calls with rolling compact digest refreshes, followed by a single incremental Tectonic PDF compilation to stay safely within rate limits (e.g. 8K TPM).
+- **Overleaf Import & TeX Softener**:
+  - Download and parse public Overleaf gallery links or pasted `.tex` files.
+  - Automatic softening ([`latex_soften.py`](file:///c:/Users/ayush/Pictures/Resume_Maker/resume_maker/backend/core/latex_soften.py)) replaces crashy XeTeX/Font Awesome packages and normalizes Unicode for Windows Tectonic compilation.
+- **Hierarchical Specialist Agents**:
+  - Domain-specific specialists (`HeaderAgent`, `SummaryAgent`, `ExperienceAgent`, `EducationAgent`, `SkillsAgent`, `ProjectsAgent`) with Pydantic output validation and auto-escaping for LaTeX characters (`&`, `$`, `%`, `_`, `#`).
+- **Self-Healing LaTeX & Line-Delta Patching**:
+  - If Tectonic compilation fails, [`line_indexer.py`](file:///c:/Users/ayush/Pictures/Resume_Maker/resume_maker/backend/core/line_indexer.py) and [`delta_patcher.py`](file:///c:/Users/ayush/Pictures/Resume_Maker/resume_maker/backend/core/delta_patcher.py) localize the error lines and apply targeted line replacements in under 3s without corrupting session state.
+- **ATS Keyword & Embedding Scorer**:
+  - ATS keyword analysis and semantic vector matching powered by Google Gemini embeddings.
 
 ---
 
@@ -25,15 +35,14 @@ frontend (React / Vite on :3000)
 FastAPI Backend (backend/main.py on :8001)
     ├── auth_store (Profiles, Tokens & Keys)
     ├── session_store (Chat History & Zone Documents with Snapshots)
-    ├── chat_router & orchestrator (Intent Routing & Step Planning)
+    ├── chat_router (Rule-based & LLM Intent Classification)
+    ├── orchestrator (Step Planning, Sequential Execution & Compact Rolling Digest)
     ├── zone_agents (Header, Summary, Experience, Education, Skills, Projects)
     ├── latex_soften (TeX Package, Unicode & Macro Compatibility Transformer)
-    ├── line_indexer (Bottom-Up Error Localization for AI Fixer)
+    ├── line_indexer & delta_patcher (Localized Line-Level Self-Healing Compiler)
     ├── llm_router (OpenAI, Groq, Gemini, Anthropic, Azure, AWS Bedrock)
-    └── compiler (Windows Tectonic CLI Compiler & Auto-Fixer Loop)
+    └── compiler (Windows Tectonic CLI Compiler & Soft-Fail Fallback)
 ```
-
-For detailed agent design specs and workspace rules, see [`AGENTS.md`](file:///c:/Users/ayush/Pictures/Resume_Maker/resume_maker/AGENTS.md).
 
 ---
 
@@ -43,12 +52,12 @@ For detailed agent design specs and workspace rules, see [`AGENTS.md`](file:///c
 
 - **Python 3.11+** with [`uv`](https://github.com/astral-sh/uv) package manager
 - **Node.js 18+**
-- **Tectonic CLI**: Place `tectonic.exe` in [`backend/bin/`](file:///c:/Users/ayush/Pictures/Resume_Maker/resume_maker/backend/bin) or ensure Tectonic is available on system `PATH`.
+- **Tectonic CLI**: Placed in [`backend/bin/`](file:///c:/Users/ayush/Pictures/Resume_Maker/resume_maker/backend/bin) or installed on system `PATH`.
 - At least one provider API key (Groq recommended).
 
 ### Environment Configuration
 
-Copy `.env.template` → `.env`:
+Create `.env` in `backend/`:
 
 ```env
 LLM_PROVIDER=groq
@@ -74,16 +83,17 @@ npm run dev
 
 ---
 
-## 🧪 Testing
-
-Run the comprehensive test suite with `uv`:
+## 🧪 Testing & Benchmarks
 
 ```powershell
 # Run all unit and integration tests
 backend\.venv\Scripts\pytest.exe tests\ -v
 
-# Run 5-change E2E live pipeline verification
-backend\.venv\Scripts\python.exe tests\test_e2e_5_changes.py
+# Run Token Optimization & Routing Comparison Benchmark
+backend\.venv\Scripts\python.exe tests\test_auto_vs_section_comparison.py
+
+# Run Custom Template E2E Verification
+backend\.venv\Scripts\python.exe tests\test_e2e_custom_template_10_changes.py
 ```
 
 ---
@@ -98,7 +108,7 @@ backend\.venv\Scripts\python.exe tests\test_e2e_5_changes.py
 | `/setup/import` | `POST` | Download, soften, and split Overleaf/GitHub template into zones |
 | `/sessions` | `POST` / `GET` | Create or list chat sessions |
 | `/sessions/{id}` | `GET` / `PATCH` | Load session or switch active provider/model |
-| `/chat` | `POST` | Agentic chat turn & document zone update |
+| `/chat` | `POST` | Agentic chat turn & document zone update (supports `target_zone`) |
 | `/chat/apply` | `POST` | Apply an edit proposal variant |
 | `/compile` | `POST` | Render LaTeX code to PDF base64 |
 | `/score` | `POST` | Calculate ATS keyword & semantic similarity score |
