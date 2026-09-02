@@ -13,6 +13,7 @@ try:
     from core.logging_setup import get_logger
     from core.zone_agents import (
         zone_agent_router,
+        _extract_delimited,
         _pre_escape_backslashes,
         _clean_backslash_typos,
         _escape_raw_latex_chars,
@@ -22,6 +23,7 @@ except ImportError:
     from .logging_setup import get_logger
     from .zone_agents import (
         zone_agent_router,
+        _extract_delimited,
         _pre_escape_backslashes,
         _clean_backslash_typos,
         _escape_raw_latex_chars,
@@ -33,9 +35,10 @@ log = get_logger("orchestrator")
 
 
 def _sanitize_tex_json(obj: Any) -> Any:
-    """De-duplicate double-double backslashes left by over-eager LLMs."""
+    """De-duplicate double backslashes left by over-eager LLMs."""
     if isinstance(obj, str):
-        obj = re.sub(r"\\\\\\\\([a-zA-Z])", r"\\\\\1", obj)
+        obj = re.sub(r"\r([a-zA-Z])", r"\\r\1", obj)
+        obj = re.sub(r"\\{2,}([a-zA-Z])", r"\\\1", obj)
         obj = _clean_backslash_typos(obj)
         obj = _escape_raw_latex_chars(obj)
         return obj
@@ -240,14 +243,26 @@ def plan_intents(
             reason="keyword_add",
         )
 
-    if re.search(r"\b(remove zone|delete zone|drop zone|remove )\b", lower):
+    # Only treat as zone removal if user explicitly targets a zone/section
+    # as a whole. "remove X from Y" = content edit, not zone removal.
+    _ZONE_REMOVE_RE = re.compile(
+        r"\b(remove zone|delete zone|drop zone"
+        r"|remove the .{0,30}(zone|section)"
+        r"|delete the .{0,30}(zone|section)"
+        r"|drop the .{0,30}(zone|section))\b",
+        re.IGNORECASE,
+    )
+    if _ZONE_REMOVE_RE.search(lower):
         target = _match_zone_by_text(doc, message)
         m = re.search(r"zone\s*(\d+)", lower)
         if m:
             target = int(m.group(1))
         if target is None:
             return OrchPlan(
-                clarify="Which zone should I remove? Give a zone number or name.",
+                clarify=(
+                    "Which zone should I remove? "
+                    "Give a zone number or name."
+                ),
                 reason="remove_unclear",
             )
         return OrchPlan(
@@ -288,9 +303,28 @@ def plan_intents(
 
     system = (
         "You are the resume zone orchestrator planner. "
-        "Zones are numbered; use zone_no from the catalog.\n"
-        "Intents: fill, edit, add_zone, remove_zone, reorder, describe, clarify.\n"
-        "Return JSON: {\"steps\":[{\"intent\":\"edit\",\"zone_nos\":[2]}],\"clarify\":null,\"reason\":\"...\"}\n"
+        "Zones are numbered sections of a resume (e.g. Education, "
+        "Experience, Projects, Skills).\n"
+        "Zones in catalog: use zone_no from the catalog.\n"
+        "\n"
+        "INTENT RULES — choose carefully:\n"
+        "- 'edit': user wants to change, add, remove, or rewrite CONTENT "
+        "INSIDE a zone (e.g. 'remove the Legal Knowledge Graph project', "
+        "'add TypeScript to skills', 'change my GPA'). "
+        "This is the most common intent. When in doubt, use edit.\n"
+        "- 'remove_zone': ONLY when the user explicitly says to delete or "
+        "remove an entire SECTION/ZONE, using phrases like 'remove the "
+        "projects section', 'delete zone 5', 'drop the certifications "
+        "section'. NEVER use remove_zone when the user says 'remove X from "
+        "Y' — that is an edit.\n"
+        "- 'add_zone': user wants a brand-new section added.\n"
+        "- 'reorder': user wants to swap or move sections.\n"
+        "- 'fill': initial population from bio data.\n"
+        "- 'clarify': request is genuinely ambiguous.\n"
+        "\n"
+        "Return JSON: "
+        "{\"steps\":[{\"intent\":\"edit\",\"zone_nos\":[2]}],"
+        "\"clarify\":null,\"reason\":\"...\"}\n"
         "If unclear which zone, set clarify and empty steps."
     )
     catalog_lines = [
@@ -375,30 +409,69 @@ def _edit_zone_latex(
 ) -> Tuple[str, str, str, str]:
     mode = "initial fill from biodata" if is_fill else "targeted edit"
     system = (
-        f"You edit Zone {zone_no} of a LaTeX resume. "
-        f"Zone purpose: {description or 'unknown'}. "
-        "Return ONLY this zone's inner LaTeX (no documentclass, no ZONE markers). "
-        'JSON: {"content":"...","summary":"one short sentence"}.'
+        f"You are editing Zone {zone_no} of a LaTeX resume "
+        f"({description or 'general'}).\n"
+        "\n"
+        "OUTPUT FORMAT — follow exactly:\n"
+        "<CONTENT>\n"
+        "...your raw LaTeX here...\n"
+        "</CONTENT>\n"
+        "<SUMMARY>one sentence describing what changed</SUMMARY>\n"
+        "\n"
+        "RULES:\n"
+        "1. Single backslash before every LaTeX command: "
+        "\\section, \\resumeSubheading, \\textbf — "
+        "never double backslashes (\\\\cmd is WRONG).\n"
+        "2. Return the complete zone, preserving all \\section{} "
+        "headings and wrapper macros "
+        "(\\resumeSubHeadingListStart, \\resumeItemListStart, etc.). "
+        "Never drop headings or swap custom macros for "
+        "\\begin{itemize}.\n"
+        "3. Only change what the user asked. Do not invent content.\n"
+        "4. No \\documentclass, \\begin{document}, or ZONE markers.\n"
     )
     user = (
         f"Mode: {mode}\n"
-        f"Current zone content:\n{current or '(empty)'}\n\n"
-        f"Other zones (context only):\n{digest}\n\n"
-        f"User request:\n{user_message}"
+        f"Current zone content (preserve all macros verbatim):\n"
+        f"{current or '(empty)'}\n\n"
+        f"Other zones (read-only context):\n{digest}\n\n"
+        f"User request: {user_message}"
     )
-    data, prov, mod = _llm_json(
-        system,
-        user,
-        provider=provider,
-        model=model,
-        api_key=api_key,
-        temperature=0.35,
-    )
-    content = (data.get("content") or data.get("latex_code") or "").strip()
-    summary = (data.get("summary") or f"Updated zone {zone_no}").strip()
-    if not content:
-        raise ValueError(f"Empty content for zone {zone_no}")
-    return content, summary, prov, mod
+    messages = [
+        ChatMessage(role="system", content=system),
+        ChatMessage(role="user", content=user),
+    ]
+    for attempt in range(3):
+        resp = llm_router.chat(
+            messages,
+            provider=provider,
+            model=model,
+            api_key=api_key,
+            temperature=0.25,
+        )
+        content, summary = _extract_delimited(resp.content)
+        if content:
+            if not summary:
+                summary = f"Updated zone {zone_no}."
+            prov = provider or ""
+            mod = model or ""
+            return content, summary, prov, mod
+        log.warning(
+            "_edit_zone_latex attempt %d: no <CONTENT> tag",
+            attempt + 1,
+        )
+        messages.append(
+            ChatMessage(role="assistant", content=resp.content)
+        )
+        messages.append(ChatMessage(
+            role="user",
+            content=(
+                "Missing <CONTENT> block. Wrap your LaTeX in "
+                "<CONTENT>...</CONTENT> and add "
+                "<SUMMARY>...</SUMMARY>."
+            ),
+        ))
+    raise ValueError(f"Empty content for zone {zone_no}")
 
 
 def _describe_zones(

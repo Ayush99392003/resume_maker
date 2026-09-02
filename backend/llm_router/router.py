@@ -53,7 +53,7 @@ class LLMRouter:
         return os.getenv("LLM_PROVIDER", "groq").strip().lower()
 
     def default_model(self) -> str:
-        return os.getenv("MODEL_NAME", "llama-3.3-70b-versatile").strip()
+        return os.getenv("MODEL_NAME", "openai/gpt-oss-120b").strip()
 
     def make_provider(
         self,

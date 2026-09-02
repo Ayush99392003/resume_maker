@@ -45,11 +45,9 @@ def _resolve_groq_model(api_key: str) -> str:
         Model ID string to use for the test.
     """
     _PREFERRED = [
-        "openai/gpt-oss-20b",
         "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
         "qwen/qwen3.6-27b",
-        "llama-3.3-70b-versatile",
-        "llama-3.1-70b-versatile",
         "llama-3.1-8b-instant",
     ]
     _SPEECH_PREFIXES = ("whisper", "canopy", "allam", "guard", "safeguard")

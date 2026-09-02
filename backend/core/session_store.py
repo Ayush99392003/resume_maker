@@ -15,6 +15,19 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_DISCONTINUED_MODELS = {
+    "llama-3.3-70b-versatile": "openai/gpt-oss-120b",
+    "llama-3.1-70b-versatile": "openai/gpt-oss-120b",
+    "gpt-oss-120b": "openai/gpt-oss-120b",
+}
+
+
+def _normalize_model(model_name: Optional[str]) -> str:
+    if not model_name:
+        return "openai/gpt-oss-120b"
+    return _DISCONTINUED_MODELS.get(model_name, model_name)
+
+
 class ChatMessageRecord(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     role: str
@@ -47,7 +60,7 @@ class ChatSession(BaseModel):
     created_at: str = Field(default_factory=_utcnow)
     updated_at: str = Field(default_factory=_utcnow)
     active_provider: str = "groq"
-    active_model: str = "llama-3.1-8b-instant"
+    active_model: str = "openai/gpt-oss-120b"
     messages: List[ChatMessageRecord] = Field(default_factory=list)
 
 
@@ -70,7 +83,7 @@ class SessionStore:
         title: str = "New resume chat",
         latex_code: str = "",
         provider: str = "groq",
-        model: str = "llama-3.3-70b-versatile",
+        model: str = "openai/gpt-oss-120b",
         welcome: Optional[str] = None,
         header: str = "",
         footer: str = "",
@@ -86,7 +99,7 @@ class SessionStore:
             template_name=template_name,
             latex_code=latex_code,
             active_provider=provider,
-            active_model=model,
+            active_model=_normalize_model(model),
             header=header,
             footer=footer,
             zones=zones or [],
@@ -116,7 +129,12 @@ class SessionStore:
         if not path.exists():
             return None
         data = json.loads(path.read_text(encoding="utf-8"))
-        return ChatSession(**data)
+        session = ChatSession(**data)
+        normalized = _normalize_model(session.active_model)
+        if session.active_model != normalized:
+            session.active_model = normalized
+            self.save(session)
+        return session
 
     def delete(self, session_id: str) -> bool:
         path = self._path(session_id)
@@ -140,7 +158,9 @@ class SessionStore:
                         "title": data.get("title"),
                         "updated_at": data.get("updated_at"),
                         "active_provider": data.get("active_provider"),
-                        "active_model": data.get("active_model"),
+                        "active_model": _normalize_model(
+                            data.get("active_model")
+                        ),
                         "template_name": data.get("template_name"),
                         "setup_complete": data.get("setup_complete", False),
                         "zone_count": len(data.get("zones") or []),

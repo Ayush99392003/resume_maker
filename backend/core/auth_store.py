@@ -36,7 +36,7 @@ class UserProfile(BaseModel):
     password_hash: str
     salt: str
     default_provider: str = "groq"
-    default_model: str = "llama-3.3-70b-versatile"
+    default_model: str = "openai/gpt-oss-120b"
     api_keys: Dict[str, str] = Field(default_factory=dict)
     created_at: str = Field(default_factory=_utcnow)
     updated_at: str = Field(default_factory=_utcnow)
@@ -92,7 +92,15 @@ class AuthStore:
         if not path.exists():
             return None
         data = json.loads(path.read_text(encoding="utf-8"))
-        return UserProfile(**data)
+        user = UserProfile(**data)
+        if user.default_model in (
+            "llama-3.3-70b-versatile",
+            "llama-3.1-70b-versatile",
+            "gpt-oss-120b",
+        ):
+            user.default_model = "openai/gpt-oss-120b"
+            self.save_user(user)
+        return user
 
     def save_user(self, user: UserProfile) -> UserProfile:
         user.updated_at = _utcnow()

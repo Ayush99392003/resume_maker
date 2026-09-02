@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
-from pydantic import BaseModel, Field, field_validator
 
 try:
     from llm_router import ChatMessage, llm_router
@@ -237,12 +235,14 @@ def _escape_raw_latex_chars(text: str) -> str:
 def _sanitize_tex_json(obj: Any) -> Any:
     """Restore TeX control sequences mangled by JSON decode.
 
-    De-duplicates double-double backslashes introduced by some LLMs
-    (``\\\\cmd`` → ``\\cmd``).
+    De-duplicates double backslashes introduced by some LLMs
+    (``\\\\cmd`` → ``\\cmd``) and restores CR mangled macro names.
     """
     if isinstance(obj, str):
-        # De-duplicate \\\\cmd → \\cmd (over-escaped by some LLMs)
-        obj = re.sub(r"\\\\\\\\([a-zA-Z])", r"\\\\\1", obj)
+        # Fix CR + letter → \r + letter (restores \resumeItem etc.)
+        obj = re.sub(r"\r([a-zA-Z])", r"\\r\1", obj)
+        # De-duplicate \\cmd → \cmd (over-escaped by some LLMs)
+        obj = re.sub(r"\\{2,}([a-zA-Z])", r"\\\1", obj)
         obj = _clean_backslash_typos(obj)
         obj = _escape_raw_latex_chars(obj)
         return obj
@@ -253,101 +253,34 @@ def _sanitize_tex_json(obj: Any) -> Any:
     return obj
 
 
-def _extract_json(text: str) -> dict:
-    text = (text or "").strip()
-    # Strip markdown fences anywhere in the string
-    if "```" in text:
-        match_code = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-        if match_code:
-            text = match_code.group(1).strip()
-        else:
-            text = re.sub(r"^.*?```(?:json)?\s*", "", text, flags=re.DOTALL)
-            text = re.sub(r"\s*```.*?$", "", text, flags=re.DOTALL).strip()
+def _extract_delimited(raw: str) -> tuple[str, str]:
+    """Extract zone content and summary from delimiter tags.
 
-    # Try parsing raw JSON first
-    try:
-        return _sanitize_tex_json(json.loads(text))
-    except Exception:
-        pass
+    Expects the LLM to return raw LaTeX (no JSON escaping) wrapped in
+    XML-style tags::
 
-    # Extract JSON object substring {...}
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    candidate = match.group(0) if match else text
+        <CONTENT>
+        ...verbatim LaTeX...
+        </CONTENT>
+        <SUMMARY>one-sentence description</SUMMARY>
 
-    try:
-        return _sanitize_tex_json(json.loads(candidate))
-    except Exception:
-        sanitized = _pre_escape_backslashes(candidate)
-        return _sanitize_tex_json(json.loads(sanitized))
-
-
-
-class ZoneAgentResponse(BaseModel):
-    content: str = Field(
-        ...,
-        description=(
-            "The updated LaTeX code fragment for this zone only. "
-            "Never return a full document or zone markers."
-        )
+    Returns:
+        Tuple of (content, summary). Either may be empty string if the
+        corresponding tag is missing.
+    """
+    content_m = re.search(
+        r"<CONTENT>\s*(.*?)\s*</CONTENT>",
+        raw,
+        re.DOTALL | re.IGNORECASE,
     )
-    summary: str = Field(
-        ...,
-        description="A short, one-sentence summary of the changes made."
+    summary_m = re.search(
+        r"<SUMMARY>\s*(.*?)\s*</SUMMARY>",
+        raw,
+        re.DOTALL | re.IGNORECASE,
     )
-
-    @field_validator("content")
-    @classmethod
-    def check_no_full_document(cls, v: str) -> str:
-        bad_commands = [
-            "\\documentclass",
-            "\\begin{document}",
-            "\\end{document}",
-        ]
-        for cmd in bad_commands:
-            if cmd in v:
-                raise ValueError(
-                    f"Do not include full document commands like '{cmd}'. "
-                    "Only return the LaTeX fragment for this specific zone."
-                )
-        return v
-
-    @field_validator("content")
-    @classmethod
-    def check_no_zone_markers(cls, v: str) -> str:
-        if "% ZONE:" in v or "ZONE:" in v:
-            raise ValueError(
-                "Do not include zone markers like '% ZONE:NAME:START' or "
-                "'% ZONE:NAME:END' in the content."
-            )
-        return v
-
-    @field_validator("content")
-    @classmethod
-    def check_valid_item_list(cls, v: str) -> str:
-        """Ensure \\item lines are enclosed in a list environment.
-
-        Accepts both standard LaTeX environments (``\\begin{itemize}``)
-        and common custom list macros used in popular resume templates
-        (e.g. ``\\resumeItemListStart``, ``\\resumeSubHeadingListStart``).
-        """
-        _CUSTOM_LIST_OPENS = (
-            "\\resumeItemListStart",
-            "\\resumeSubHeadingListStart",
-            "\\resumeSubItemListStart",
-        )
-        if "\\item" in v:
-            has_std_env = (
-                "\\begin{" in v and "\\end{" in v
-            )
-            has_custom_env = any(macro in v for macro in _CUSTOM_LIST_OPENS)
-            if not has_std_env and not has_custom_env:
-                raise ValueError(
-                    "Bare \\item bullets are forbidden. Enclose them in a "
-                    "list environment like \\begin{itemize} ... "
-                    "\\end{itemize} or use a custom list macro such as "
-                    "\\resumeItemListStart."
-                )
-        return v
+    content = content_m.group(1).strip() if content_m else ""
+    summary = summary_m.group(1).strip() if summary_m else ""
+    return content, summary
 
 
 class ZoneAgent:
@@ -371,43 +304,77 @@ class ZoneAgent:
     ) -> Tuple[str, str]:
         """Return (new_zone_latex, short_summary)."""
         mode = "initial fill from bio" if is_initial else "targeted edit"
+
+        # Build the verbatim snapshot of macros used in the current zone
+        # so the LLM sees the exact names, not a description.
+        macro_list = ", ".join(
+            m
+            for m in re.findall(r"\\([a-zA-Z]+)", current_zone)
+            if m not in {
+                "begin", "end", "item", "vspace", "hspace",
+                "textbf", "textit", "texttt", "small", "large",
+                "newline", "noindent", "centering",
+            }
+        )
+        macros_hint = (
+            f"Macros found in current zone: {macro_list}\n"
+            if macro_list else ""
+        )
+
         system = (
             f"You are the {self.role} for a LaTeX resume.\n"
-            f"You ONLY edit the {self.zone_id} zone. Never return a full "
-            f"document, preamble, or zone markers.\n"
-            f"CRITICAL STRUCTURAL RULES:\n"
-            f"1. PRESERVE TEMPLATE MACROS: Inspect the current zone content carefully. "
-            f"If the current zone uses custom template macros (such as \\resumeSubheading, \\resumeItem, "
-            f"\\resumeSubItem, \\resumeSubHeadingListStart, \\resumeItemListStart, \\cventry, \\cvitem), "
-            f"YOU MUST USE THOSE EXACT MACROS for new or edited entries. Never downgrade or replace them with generic unstyled commands.\n"
-            f"2. TABULAR ALIGNMENT: In multi-column tabular environments (e.g. \\begin{{tabular*}} ... \\end{{tabular*}}), "
-            f"use bare `&` to separate columns and `\\\\` to end rows.\n"
-            f"3. LIST ENVIRONMENTS: If using \\item bullets, you MUST enclose them within a valid list environment "
-            f"like \\begin{{itemize}} ... \\end{{itemize}} or the template's designated list macro (e.g. \\resumeItemListStart).\n"
-            f"Return your answer as a JSON object containing 'content' "
-            f"and 'summary' fields.\n\n"
-            f"--- EXAMPLES ---\n"
-            f"Example 1: Adding a skills item with custom macro\n"
-            f"Request: Add Python, Java to Skills\n"
-            f"Response JSON: {{\n"
-            f"  \"content\": \"\\\\resumeSubItem{{Languages}}{{Python, Java}}\",\n"
-            f"  \"summary\": \"Added Python and Java to skills.\"\n"
-            f"}}\n\n"
-            f"Example 2: Adding experience bullets\n"
-            f"Request: Add bullet about database design\n"
-            f"Response JSON: {{\n"
-            f"  \"content\": \"\\\\begin{{itemize}}\\n"
-            f"\\\\item Designed database schema.\\\\end{{itemize}}\",\n"
-            f"  \"summary\": \"Added bullet point for database design.\"\n"
-            f"}}\n\n"
-            f"LaTeX guidance:\n{self.latex_hints}"
+            "\n"
+            "OUTPUT FORMAT — follow exactly:\n"
+            "<CONTENT>\n"
+            "...your LaTeX here...\n"
+            "</CONTENT>\n"
+            "<SUMMARY>one sentence describing what changed</SUMMARY>\n"
+            "\n"
+            "LATEX OUTPUT RULES (non-negotiable):\n"
+            "1. Write raw LaTeX. Single backslash before every command: "
+            "\\resumeSubheading, \\section, \\textbf, \\begin — never "
+            "double backslashes (\\\\cmd is WRONG).\n"
+            "2. Preserve the EXACT macros from the current zone. If the "
+            "zone uses \\resumeSubHeadingListStart, keep it. If it uses "
+            "\\resumeItemListStart, keep it. Never swap to plain "
+            "\\begin{itemize}.\n"
+            "3. Keep \\section{...} headings. Never drop them.\n"
+            "4. Only make the minimal change requested. Return the complete "
+            "zone, not just the changed line.\n"
+            "5. Never include \\documentclass, \\begin{document}, or "
+            "% ZONE markers.\n"
+            "6. In tabular/tabular* rows: use & to separate columns and "
+            "\\\\ to end rows (this is the ONE place double-backslash is "
+            "correct: row-ending, not commands).\n"
+            "\n"
+            f"{macros_hint}"
+            f"Zone-specific guidance: {self.latex_hints}\n"
+            "\n"
+            "--- CORRECT EXAMPLE ---\n"
+            "Request: Change GPA to 3.9\n"
+            "<CONTENT>\n"
+            "\\section{Education}\n"
+            "  \\resumeSubHeadingListStart\n"
+            "    \\resumeSubheading\n"
+            "      {MIT}{Boston, MA}\n"
+            "      {BS Computer Science; GPA: 3.9}{2020 -- 2024}\n"
+            "  \\resumeSubHeadingListEnd\n"
+            "</CONTENT>\n"
+            "<SUMMARY>Updated GPA to 3.9 in Education.</SUMMARY>\n"
+            "\n"
+            "--- WRONG (never do this) ---\n"
+            "\\\\section{Education}   <- double backslash = WRONG\n"
+            "\\\\resumeSubheading    <- double backslash = WRONG\n"
+            "\\begin{itemize}       <- wrong list env if zone uses "
+            "\\resumeSubHeadingListStart\n"
         )
         user = (
             f"Mode: {mode}\n"
             f"Zone: {self.zone_id}\n"
-            f"Current zone content:\n{current_zone or '(empty)'}\n\n"
-            f"Other zones (context only, do not rewrite):\n{full_digest}\n\n"
-            f"User request:\n{user_message}"
+            f"Current zone content (copy macros verbatim from here):\n"
+            f"{current_zone or '(empty)'}\n\n"
+            f"Other zones (read-only context):\n{full_digest}\n\n"
+            f"User request: {user_message}"
         )
 
         messages = [
@@ -421,51 +388,61 @@ class ZoneAgent:
                 provider=provider,
                 model=model,
                 api_key=api_key,
-                temperature=0.35,
-                response_format="json",
+                temperature=0.25,
             )
             raw_content = resp.content
-            try:
-                # Pre-escape invalid backslashes
-                sanitized = _pre_escape_backslashes(raw_content)
-                data = _extract_json(sanitized)
-            except Exception as e:
-                err_msg = (
-                    f"JSON parsing failed: {e}. Please ensure you return "
-                    "a valid JSON object matching the schema."
-                )
+            content, summary = _extract_delimited(raw_content)
+
+            if not content:
                 log.warning(
-                    "Attempt %d JSON parse failed: %s", attempt + 1, e
+                    "Attempt %d: no <CONTENT> tag found in response",
+                    attempt + 1,
+                )
+                retry_msg = (
+                    "Your response did not contain a <CONTENT> block. "
+                    "You MUST wrap the LaTeX in <CONTENT>...</CONTENT> "
+                    "and add <SUMMARY>...</SUMMARY>. Try again."
                 )
                 messages.append(
                     ChatMessage(role="assistant", content=raw_content)
                 )
-                messages.append(ChatMessage(role="user", content=err_msg))
+                messages.append(
+                    ChatMessage(role="user", content=retry_msg)
+                )
                 continue
 
-            try:
-                validated = ZoneAgentResponse.model_validate(data)
-                content = validated.content.strip()
-                content = _clean_backslash_typos(content)
-                summary = validated.summary.strip()
-                if not content:
-                    raise ValueError("content field is empty")
-                return content, summary
-            except Exception as e:
-                err_msg = (
-                    f"Validation failed:\n{e}\n"
-                    "Please fix these errors and return a valid JSON object."
-                )
-                log.warning(
-                    "Attempt %d validation failed: %s", attempt + 1, e
-                )
-                messages.append(
-                    ChatMessage(role="assistant", content=raw_content)
-                )
-                messages.append(ChatMessage(role="user", content=err_msg))
+            # Guard against full-document leakage
+            for bad in (
+                "\\documentclass",
+                "\\begin{document}",
+                "\\end{document}",
+            ):
+                if bad in content:
+                    log.warning(
+                        "Attempt %d: full-document command '%s' in content",
+                        attempt + 1,
+                        bad,
+                    )
+                    content = re.sub(
+                        r"\\documentclass.*?\\begin\{document\}",
+                        "",
+                        content,
+                        flags=re.DOTALL,
+                    ).strip()
+
+            if not summary:
+                summary = f"Updated {self.zone_id.lower()} zone."
+
+            log.info(
+                "zone_agent.run: zone=%s attempt=%d ok",
+                self.zone_id,
+                attempt + 1,
+            )
+            return content, summary
 
         raise ValueError(
-            f"ZoneAgent {self.zone_id} failed after {max_retries} attempts."
+            f"ZoneAgent {self.zone_id} failed after "
+            f"{max_retries} attempts: no valid <CONTENT> block."
         )
 
 
@@ -473,9 +450,10 @@ class HeaderAgent(ZoneAgent):
     zone_id = "HEADER"
     role = "Header / contact specialist"
     latex_hints = (
-        "Preserve the exact tabular/tabular* structure and columns. "
-        "Use bare `&` to separate columns and `\\\\` to end rows. "
-        "Do not escape table column `&` to `\\&`."
+        "Preserve the tabular/tabular* structure exactly. "
+        "Use bare & to separate columns and \\\\ to end rows "
+        "(row-ending double-backslash is correct here). "
+        "Do NOT escape & to \\&."
     )
 
 
@@ -483,8 +461,9 @@ class SummaryAgent(ZoneAgent):
     zone_id = "SUMMARY"
     role = "Professional summary specialist"
     latex_hints = (
-        "Write 2-4 concise sentences of plain LaTeX text (no \\section). "
-        "Professional tone; highlight impact and focus."
+        "Return 2-4 sentences of plain LaTeX text. "
+        "No \\section heading — this zone has none. "
+        "Professional and concise."
     )
 
 
@@ -492,9 +471,11 @@ class ExperienceAgent(ZoneAgent):
     zone_id = "EXPERIENCE"
     role = "Work experience specialist"
     latex_hints = (
-        "If the original zone uses custom template macros (e.g. \\resumeSubheading, \\resumeItemListStart, \\resumeItem, \\cventry), "
-        "YOU MUST USE THOSE EXACT MACROS for new or updated job entries. "
-        "Ensure all itemize or resumeItemList blocks are wrapped in \\resumeItemListStart ... \\resumeItemListEnd."
+        "Use \\resumeSubheading for each job entry. "
+        "Wrap bullets in \\resumeItemListStart ... \\resumeItemListEnd. "
+        "Use \\resumeItem{Title}{description} for each bullet. "
+        "Preserve \\section{Experience} and "
+        "\\resumeSubHeadingListStart ... \\resumeSubHeadingListEnd."
     )
 
 
@@ -502,7 +483,10 @@ class EducationAgent(ZoneAgent):
     zone_id = "EDUCATION"
     role = "Education specialist"
     latex_hints = (
-        "If the original zone uses \\resumeSubheading or \\cventry, YOU MUST USE THOSE EXACT MACROS."
+        "Preserve \\section{Education}, "
+        "\\resumeSubHeadingListStart, and \\resumeSubHeadingListEnd. "
+        "Use \\resumeSubheading{Uni}{Location}{Degree; CGPA}{Dates} "
+        "for each entry. Never use \\begin{itemize}."
     )
 
 
@@ -510,7 +494,11 @@ class SkillsAgent(ZoneAgent):
     zone_id = "SKILLS"
     role = "Skills specialist"
     latex_hints = (
-        "If the original zone uses \\resumeSubItem or \\cvitem, YOU MUST USE THOSE EXACT MACROS."
+        "Preserve \\section{...}, \\resumeSubHeadingListStart, "
+        "\\resumeSubHeadingListEnd. "
+        "Use \\resumeSubItem{Category}{values} for each row. "
+        "Never use \\begin{itemize} in place of "
+        "\\resumeSubHeadingListStart."
     )
 
 
@@ -518,7 +506,11 @@ class ProjectsAgent(ZoneAgent):
     zone_id = "PROJECTS"
     role = "Projects specialist"
     latex_hints = (
-        "If the original zone uses \\resumeSubItem or \\resumeProjectHeading, YOU MUST USE THOSE EXACT MACROS."
+        "Preserve \\section{Projects} and "
+        "\\resumeSubHeadingListStart ... \\resumeSubHeadingListEnd. "
+        "Use \\resumeSubItem or \\resumeProjectHeading for project "
+        "entries. Wrap bullet points in "
+        "\\resumeItemListStart ... \\resumeItemListEnd."
     )
 
 ZONE_AGENT_CLASSES = {

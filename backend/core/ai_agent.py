@@ -91,10 +91,10 @@ def _sanitize_tex_json(obj: Any) -> Any:
     - ``\\\\`` (double-double-backslash) → ``\\`` (de-duplicates over-escaped)
     """
     if isinstance(obj, str):
-        # Fix CR + letter → \r + letter  (restores \resumeItem etc.)
+        # Fix CR + letter → \r + letter (restores \resumeItem etc.)
         obj = re.sub(r"\r([a-zA-Z])", r"\\r\1", obj)
-        # De-duplicate \\\\cmd → \\cmd (over-escaped by some LLMs)
-        obj = re.sub(r"\\\\\\\\([a-zA-Z])", r"\\\\\1", obj)
+        # De-duplicate \\cmd → \cmd (over-escaped by some LLMs)
+        obj = re.sub(r"\\{2,}([a-zA-Z])", r"\\\1", obj)
         return obj
     elif isinstance(obj, dict):
         return {k: _sanitize_tex_json(v) for k, v in obj.items()}
@@ -339,9 +339,12 @@ class AIAgent:
             "}\n"
             "\n"
             "Rules:\n"
-            "- NEVER output a full LaTeX document unless absolutely necessary.\n"
-            "- CRITICAL: enclose all \\item lines in "
-            "\\begin{itemize}...\\end{itemize}.\n"
+            "- NEVER output a full LaTeX document unless necessary.\n"
+            "- CRITICAL: ensure list items are enclosed in the template's\n"
+            "  designated list macros (e.g. \\resumeSubHeadingListStart ...\n"
+            "  \\resumeSubHeadingListEnd, \\resumeItemListStart ...\n"
+            "  \\resumeItemListEnd, or \\begin{itemize} ... \\end{itemize}).\n"
+            "  Never strip section headings or custom template macros.\n"
             "- Preserve all % ZONE:N:START / END markers exactly.\n"
             "- Only fix the lines shown; do not invent new content."
         )

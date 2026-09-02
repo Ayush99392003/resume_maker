@@ -9,6 +9,14 @@ from pydantic import BaseModel
 from .base import ChatMessage, LLMProvider, LLMResponse
 
 
+_MODEL_ALIASES: dict[str, str] = {
+    "llama-3.3-70b-versatile": "openai/gpt-oss-120b",
+    "llama-3.1-70b-versatile": "openai/gpt-oss-120b",
+    "gpt-oss-120b": "openai/gpt-oss-120b",
+    "gpt-oss-20b": "openai/gpt-oss-20b",
+}
+
+
 class GroqProvider(LLMProvider):
     name = "groq"
 
@@ -44,9 +52,12 @@ class GroqProvider(LLMProvider):
         temperature: float = 0.4,
         response_format: Optional[str] = None,
     ) -> LLMResponse:
+        resolved_model = _MODEL_ALIASES.get(model, model)
         kwargs = {
-            "model": model,
-            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "model": resolved_model,
+            "messages": [
+                {"role": m.role, "content": m.content} for m in messages
+            ],
             "temperature": temperature,
         }
         if response_format == "json":
@@ -67,16 +78,22 @@ class GroqProvider(LLMProvider):
                 return LLMResponse(
                     content=content,
                     provider=self.name,
-                    model=model,
+                    model=resolved_model,
                     raw=resp,
                     usage=usage,
                 )
             except Exception as err:
                 err_str = str(err).lower()
-                if "response_format" in kwargs and ("json" in err_str or "400" in err_str):
+                if "response_format" in kwargs and (
+                    "json" in err_str or "400" in err_str
+                ):
                     kwargs.pop("response_format", None)
                     continue
-                if ("429" in err_str or "rate_limit" in err_str or "rate limit" in err_str) and attempt < max_attempts - 1:
+                if (
+                    "429" in err_str
+                    or "rate_limit" in err_str
+                    or "rate limit" in err_str
+                ) and attempt < max_attempts - 1:
                     time.sleep(6.0 * (attempt + 1))
                     continue
                 raise err
@@ -90,9 +107,11 @@ class GroqProvider(LLMProvider):
         temperature: float = 0.4,
     ) -> BaseModel:
         import instructor
+
+        resolved_model = _MODEL_ALIASES.get(model, model)
         client = instructor.from_openai(self.client)
         return client.chat.completions.create(
-            model=model,
+            model=resolved_model,
             response_model=response_model,
             messages=[
                 {"role": m.role, "content": m.content} for m in messages

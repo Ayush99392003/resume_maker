@@ -19,8 +19,7 @@ LOG_LOCALS = os.getenv("LOG_LOCALS", "0").strip()
 
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq").strip().lower()
 # llama-3.1-8b-instant is always available on Groq free tier
-# Override via MODEL_NAME env var for larger models.
-MODEL_NAME = os.getenv("MODEL_NAME", "llama-3.1-8b-instant").strip()
+MODEL_NAME = os.getenv("MODEL_NAME", "openai/gpt-oss-120b").strip()
 
 # Provider keys (read by llm_router)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")

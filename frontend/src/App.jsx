@@ -13,7 +13,7 @@ import 'ace-builds/src-noconflict/ext-language_tools';
 const API_BASE = '/api';
 
 const PROVIDER_MODELS = {
-  groq: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'],
+  groq: ['openai/gpt-oss-120b', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'],
   openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1'],
   gemini: ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash'],
   anthropic: ['claude-3-5-sonnet-latest', 'claude-3-5-haiku-latest'],
@@ -69,7 +69,7 @@ export default function App() {
   const [sessionId, setSessionId] = useState(() => localStorage.getItem('rm_session_id') || '');
   const [sessions, setSessions] = useState([]);
   const [provider, setProvider] = useState('groq');
-  const [model, setModel] = useState('llama-3.3-70b-versatile');
+  const [model, setModel] = useState('openai/gpt-oss-120b');
   const [providerInfo, setProviderInfo] = useState(null);
   // New-chat setup: either template URL/paste OR zone selection
   const [setupMode, setSetupMode] = useState(false);
@@ -179,7 +179,12 @@ export default function App() {
   const applyProfile = (p) => {
     setProfile(p);
     if (p.default_provider) setProvider(p.default_provider);
-    if (p.default_model) setModel(p.default_model);
+    if (p.default_model) {
+      const m = (p.default_model === 'llama-3.3-70b-versatile' || p.default_model === 'llama-3.1-70b-versatile' || p.default_model === 'gpt-oss-120b')
+        ? 'openai/gpt-oss-120b'
+        : p.default_model;
+      setModel(m);
+    }
     // Never put secret values into inputs — only track typed updates
     setKeyDrafts({});
   };
@@ -303,7 +308,10 @@ export default function App() {
     applyZoneState(s, s.latex_code || '');
     setSelectedTemplate(s.template_name || 'classic');
     setProvider(s.active_provider || provider);
-    setModel(s.active_model || model);
+    const activeM = (s.active_model === 'llama-3.3-70b-versatile' || s.active_model === 'llama-3.1-70b-versatile' || s.active_model === 'gpt-oss-120b')
+      ? 'openai/gpt-oss-120b'
+      : (s.active_model || model);
+    setModel(activeM);
     setOverleafUrl(s.source_url || '');
     if (s.latex_code) {
       compileAndRender(s.latex_code, s.session_id, { quiet: true, persist: false });
