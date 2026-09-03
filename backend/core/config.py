@@ -42,3 +42,10 @@ if GEMINI_API_KEY:
         genai.configure(api_key=GEMINI_API_KEY)
     except Exception:
         pass
+
+# Concurrency & Multi-user Settings
+MAX_CONCURRENT_COMPILES = int(os.getenv("MAX_CONCURRENT_COMPILES", "3"))
+REQUIRE_AUTH_FOR_SESSIONS = os.getenv(
+    "REQUIRE_AUTH_FOR_SESSIONS", "1"
+).strip().lower() in ("1", "true", "yes")
+

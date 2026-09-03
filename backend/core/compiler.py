@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+
 
 try:
     from core.logging_setup import get_logger
@@ -228,7 +230,16 @@ class TectonicCompiler:
                 raise CompilationError("No PDF.", logs="No PDF found.")
             return pdf_file.read_bytes()
 
+    async def compile_async(
+        self, latex_code: str, *, project_dir: str | None = None
+    ) -> bytes:
+        """Asynchronously compile LaTeX into PDF bytes without blocking."""
+        return await asyncio.to_thread(
+            self.compile, latex_code, project_dir=project_dir
+        )
+
 
 # Configure fonts as soon as this module loads
+
 apply_fontconfig_env()
 compiler = TectonicCompiler()
