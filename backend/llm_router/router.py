@@ -82,6 +82,36 @@ class LLMRouter:
             f"Supported: {', '.join(SUPPORTED_PROVIDERS)}"
         )
 
+    def make_provider_from_config(
+        self,
+        provider: str,
+        cfg: "ProviderConfig",  # type: ignore[name-defined]
+    ) -> LLMProvider:
+        """Build a fully-configured provider from a ProviderConfig object.
+
+        Used for per-user credential injection — all provider-specific
+        fields (Azure endpoint, AWS credentials, etc.) flow through here.
+        """
+        p = provider.strip().lower()
+        if p == "azure":
+            return AzureProvider(
+                api_key=(cfg.api_key or "").strip() or None,
+                endpoint=(cfg.endpoint or "").strip() or None,
+                deployment=(cfg.deployment or "").strip() or None,
+                api_version=(cfg.api_version or "2024-02-01").strip(),
+            )
+        if p == "aws":
+            return AWSProvider(
+                access_key_id=(cfg.access_key_id or "").strip() or None,
+                secret_access_key=(
+                    cfg.secret_access_key or ""
+                ).strip() or None,
+                region=(cfg.region or "us-east-1").strip(),
+                model_id=(cfg.model_id or "").strip() or None,
+            )
+        # Simple key providers: openai / groq / gemini / anthropic
+        return self.make_provider(p, api_key=(cfg.api_key or "").strip() or None)
+
     def get_provider(
         self,
         name: Optional[str] = None,

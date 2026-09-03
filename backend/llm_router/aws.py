@@ -15,18 +15,24 @@ class AWSProvider(LLMProvider):
         self,
         region: Optional[str] = None,
         model_id: Optional[str] = None,
+        access_key_id: Optional[str] = None,
+        secret_access_key: Optional[str] = None,
     ):
-        self.region = region or os.getenv("AWS_REGION", "us-east-1")
-        self.default_model_id = model_id or os.getenv("AWS_BEDROCK_MODEL_ID")
+        self.region = (region or "").strip() or os.getenv(
+            "AWS_REGION", "us-east-1"
+        )
+        self.default_model_id = (model_id or "").strip() or os.getenv(
+            "AWS_BEDROCK_MODEL_ID"
+        )
+        # Explicit credentials override env vars / IAM role
+        self._access_key_id = (access_key_id or "").strip() or None
+        self._secret_access_key = (secret_access_key or "").strip() or None
         self._client = None
 
     def ensure_configured(self) -> None:
-        # boto3 uses standard AWS credential chain (env, profile, IAM role)
-        access = os.getenv("AWS_ACCESS_KEY_ID")
-        secret = os.getenv("AWS_SECRET_ACCESS_KEY")
-        if not self.default_model_id and not os.getenv("AWS_BEDROCK_MODEL_ID"):
-            # model can still be passed per-call
-            pass
+        # Accept explicit creds, env vars, IAM role, or shared credentials.
+        access = self._access_key_id or os.getenv("AWS_ACCESS_KEY_ID")
+        secret = self._secret_access_key or os.getenv("AWS_SECRET_ACCESS_KEY")
         if not access or not secret:
             # Allow IAM role / shared credentials; only warn via import check
             try:
@@ -45,9 +51,11 @@ class AWSProvider(LLMProvider):
                 raise ImportError(
                     "Install boto3 package: pip install boto3"
                 ) from e
-            self._client = boto3.client(
-                "bedrock-runtime", region_name=self.region
-            )
+            kwargs: dict = {"region_name": self.region}
+            if self._access_key_id and self._secret_access_key:
+                kwargs["aws_access_key_id"] = self._access_key_id
+                kwargs["aws_secret_access_key"] = self._secret_access_key
+            self._client = boto3.client("bedrock-runtime", **kwargs)
         return self._client
 
     def chat(
