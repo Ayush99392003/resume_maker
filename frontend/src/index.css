@@ -30,12 +30,32 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Custom Scrollbar Polish */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #cfcbc2 transparent;
+}
+
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
   background: #cfcbc2;
   border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #a9a499;
+}
+
+/* Horizontal scroll fade mask */
+.mask-scroll-fade {
+  mask-image: linear-gradient(to right, black 85%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, black 85%, transparent 100%);
 }
