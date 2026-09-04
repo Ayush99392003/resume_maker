@@ -58,3 +58,6 @@ backend/logs/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Documentation / Scratch history
+GIT_HISTORY.md
