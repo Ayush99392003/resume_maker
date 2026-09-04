@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import traceback
 import uuid
@@ -11,6 +12,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+
 
 try:
     from core.compiler import compiler, CompilationError
@@ -24,10 +26,14 @@ try:
         session_store,
         take_snapshot,
         rollback_to_snapshot,
+        push_turn_snapshot,
+        tag_turn_snapshot,
+        pop_turn_snapshot,
+        ChatSession,
     )
     from core.zones import zone_engine
     from core.logging_setup import get_logger, setup_logging
-    from core.auth_store import auth_store
+    from core.auth_store import auth_store, UserProfile, ProviderConfig
     from core.latex_to_zones import latex_to_zones
     from core.overleaf_import import (
         import_overleaf_url,
@@ -56,10 +62,15 @@ except ImportError:
         session_store,
         take_snapshot,
         rollback_to_snapshot,
+        push_turn_snapshot,
+        tag_turn_snapshot,
+        pop_turn_snapshot,
+        ChatSession,
     )
     from .core.zones import zone_engine
     from .core.logging_setup import get_logger, setup_logging
-    from .core.auth_store import auth_store
+    from .core.auth_store import auth_store, UserProfile, ProviderConfig
+
     from .core.latex_to_zones import latex_to_zones
     from .core.overleaf_import import (
         import_overleaf_url,
@@ -125,6 +136,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+compile_semaphore = asyncio.Semaphore(config.MAX_CONCURRENT_COMPILES)
+
 
 
 @app.middleware("http")
@@ -300,7 +314,7 @@ def _resolve_llm(
 
 
 def _token_from_header(authorization: Optional[str]) -> Optional[str]:
-    if not authorization:
+    if not authorization or not isinstance(authorization, str):
         return None
     parts = authorization.strip().split()
     if len(parts) == 2 and parts[0].lower() == "bearer":
@@ -328,7 +342,54 @@ def _resolve_api_key(
     return profile_key
 
 
+def _resolve_provider_config(
+    provider: str,
+    user: Optional[UserProfile],
+) -> Optional[ProviderConfig]:
+    """Return the user's stored ProviderConfig for the given provider.
+
+    Returns None when no config exists (caller falls back to env vars).
+    """
+    return auth_store.get_provider_config(user, provider)
+
+
+def _get_current_user(
+    authorization: Optional[str], *, required: bool = False
+) -> Optional[UserProfile]:
+    token = _token_from_header(authorization)
+    user = auth_store.user_from_token(token)
+    if required and not user:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required. Please log in.",
+        )
+    return user
+
+
+def _check_session_access(
+    session: ChatSession, user: Optional[UserProfile]
+) -> None:
+    if config.REQUIRE_AUTH_FOR_SESSIONS:
+        if not user:
+            raise HTTPException(
+                status_code=401,
+                detail="Authentication required to access session.",
+            )
+        if not session_store.verify_ownership(session, user.username):
+            raise HTTPException(
+                status_code=403,
+                detail="Forbidden: You do not have access to this session.",
+            )
+    else:
+        if user and not session_store.verify_ownership(session, user.username):
+            raise HTTPException(
+                status_code=403,
+                detail="Forbidden: You do not have access to this session.",
+            )
+
+
 class RegisterRequest(BaseModel):
+
     username: str
     password: str
 
@@ -350,7 +411,23 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
-def compile_with_retry(
+class ProviderConfigRequest(BaseModel):
+    """All possible credential fields — only relevant ones need to be set."""
+    # Simple key providers
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+    # Azure OpenAI
+    endpoint: Optional[str] = None
+    deployment: Optional[str] = None
+    api_version: Optional[str] = None
+    # AWS Bedrock
+    access_key_id: Optional[str] = None
+    secret_access_key: Optional[str] = None
+    region: Optional[str] = None
+    model_id: Optional[str] = None
+
+
+async def compile_with_retry(
     latex_code: str,
     max_retries: int = 2,
     *,
@@ -371,13 +448,17 @@ def compile_with_retry(
 
     for attempt in range(max_retries + 1):
         try:
-            pdf = compiler.compile(current_latex, project_dir=project_dir)
+            async with compile_semaphore:
+                pdf = await compiler.compile_async(
+                    current_latex, project_dir=project_dir
+                )
             log.info(
                 "compile_retry.step: ok attempt=%s pdf_bytes=%s",
                 attempt,
                 len(pdf),
             )
             return (pdf, current_latex)
+
         except CompilationError as e:
             log.error(
                 "compile_retry.error: attempt=%s/%s - %s\n%s",
@@ -432,6 +513,13 @@ async def root():
         "default_provider": config.LLM_PROVIDER,
         "default_model": config.MODEL_NAME,
     }
+
+
+@app.get("/health")
+async def health():
+    """Health check endpoint for Docker, load balancers, and reverse proxies."""
+    return {"status": "ok"}
+
 
 
 @app.get("/providers")
@@ -539,8 +627,118 @@ async def change_password(
     return {"ok": True, "detail": "Password updated"}
 
 
+# ---------- Provider credential management ----------
+
+
+@app.get("/auth/profile/providers")
+async def list_provider_configs(
+    authorization: Optional[str] = Header(default=None),
+):
+    """List configured providers with status/hint — never raw secrets."""
+    user = auth_store.user_from_token(_token_from_header(authorization))
+    if not user:
+        raise HTTPException(status_code=401, detail="Not logged in")
+
+    providers = ("groq", "openai", "gemini", "anthropic", "azure", "aws")
+    result = []
+    for p in providers:
+        cfg = auth_store.get_provider_config(user, p)
+        if cfg:
+            result.append({
+                "provider": p,
+                "configured": cfg.is_configured(p),
+                "hint": cfg.masked_hint() if cfg.is_configured(p) else "",
+                "model": cfg.model or cfg.model_id or "",
+                "fields_set": cfg.fields_set_names(p),
+            })
+        else:
+            result.append({
+                "provider": p,
+                "configured": False,
+                "hint": "",
+                "model": "",
+                "fields_set": [],
+            })
+    return {"providers": result}
+
+
+@app.put("/auth/profile/providers/{provider}")
+async def save_provider_config(
+    provider: str,
+    req: ProviderConfigRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Save credentials for one provider. Raw secrets are encrypted at rest.
+    Response never includes raw secrets — only configured status and hint.
+    """
+    user = auth_store.user_from_token(_token_from_header(authorization))
+    if not user:
+        raise HTTPException(status_code=401, detail="Not logged in")
+
+    p = provider.strip().lower()
+    if p not in ("groq", "openai", "gemini", "anthropic", "azure", "aws"):
+        raise HTTPException(
+            status_code=400, detail=f"Unknown provider: {provider}"
+        )
+
+    # Load existing config so we only update provided fields
+    existing = auth_store.get_provider_config(user, p) or ProviderConfig()
+
+    def _set(field: str, value: Optional[str]) -> None:
+        if value is not None:
+            stripped = value.strip()
+            if stripped:
+                setattr(existing, field, stripped)
+
+    _set("api_key", req.api_key)
+    _set("model", req.model)
+    _set("endpoint", req.endpoint)
+    _set("deployment", req.deployment)
+    _set("api_version", req.api_version)
+    _set("access_key_id", req.access_key_id)
+    _set("secret_access_key", req.secret_access_key)
+    _set("region", req.region)
+    _set("model_id", req.model_id)
+
+    user = auth_store.set_provider_config(user, p, existing)
+    log.info(
+        "auth: saved provider config user=%s provider=%s fields=%s",
+        user.username,
+        p,
+        existing.fields_set_names(p),
+    )
+    return {
+        "provider": p,
+        "configured": existing.is_configured(p),
+        "hint": existing.masked_hint() if existing.is_configured(p) else "",
+        "model": existing.model or existing.model_id or "",
+        "fields_set": existing.fields_set_names(p),
+    }
+
+
+@app.delete("/auth/profile/providers/{provider}")
+async def delete_provider_config(
+    provider: str,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Clear all stored credentials for one provider."""
+    user = auth_store.user_from_token(_token_from_header(authorization))
+    if not user:
+        raise HTTPException(status_code=401, detail="Not logged in")
+
+    p = provider.strip().lower()
+    auth_store.delete_provider_config(user, p)
+    log.info(
+        "auth: cleared provider config user=%s provider=%s", user.username, p
+    )
+    return {"provider": p, "configured": False, "hint": "", "fields_set": []}
+
+
 @app.post("/compile")
-async def compile_latex_direct(req: CompileRequest):
+async def compile_latex_direct(
+    req: CompileRequest,
+    authorization: Optional[str] = Header(default=None),
+):
     log.info(
         "compile.step: request session=%s raw_chars=%s",
         req.session_id,
@@ -548,10 +746,13 @@ async def compile_latex_direct(req: CompileRequest):
     )
     latex = ensure_full_document(req.latex_code or "")
     project_dir = req.project_dir
-    if not project_dir and req.session_id:
+    if req.session_id:
         sess = session_store.get(req.session_id)
         if sess:
-            project_dir = getattr(sess, "project_dir", None)
+            user = _get_current_user(authorization, required=False)
+            _check_session_access(sess, user)
+            if not project_dir:
+                project_dir = getattr(sess, "project_dir", None)
     log.info(
         "compile.step: soften/shell ok chars=%s has_begin=%s project_dir=%s",
         len(latex),
@@ -559,7 +760,10 @@ async def compile_latex_direct(req: CompileRequest):
         bool(project_dir),
     )
     try:
-        pdf_bytes = compiler.compile(latex, project_dir=project_dir)
+        async with compile_semaphore:
+            pdf_bytes = await compiler.compile_async(
+                latex, project_dir=project_dir
+            )
         log.info("compile.step: ok pdf_bytes=%s", len(pdf_bytes))
         return {
             "pdf_base64": _pdf_b64(pdf_bytes),
@@ -610,12 +814,13 @@ async def generate_resume(req: GenerateRequest):
             model=model,
             api_key=req.api_key,
         )
-        pdf_bytes, latex = compile_with_retry(
+        pdf_bytes, latex = await compile_with_retry(
             update.latex_code,
             provider=provider,
             model=model,
             api_key=req.api_key,
         )
+
         return {
             "latex_code": latex,
             "pdf_base64": _pdf_b64(pdf_bytes),
@@ -711,13 +916,14 @@ async def apply_edit(req: ApplyRequest):
         pdf_b64 = None
         latex = new_latex
         try:
-            pdf_bytes, latex = compile_with_retry(
+            pdf_bytes, latex = await compile_with_retry(
                 new_latex,
                 provider=provider,
                 model=model,
                 api_key=req.api_key,
             )
             pdf_b64 = _pdf_b64(pdf_bytes)
+
         except Exception as e:
             compile_error = str(e)
             log.error("apply: compile failed - %s", e)
@@ -828,12 +1034,13 @@ async def squeeze_resume(
         update = ai_agent.squeeze_layout(
             latex, provider=provider, model=model, api_key=api_key
         )
-        pdf_bytes, out = compile_with_retry(
+        pdf_bytes, out = await compile_with_retry(
             update.latex_code,
             provider=provider,
             model=model,
             api_key=api_key,
         )
+
         return {
             "latex_code": out,
             "pdf_base64": _pdf_b64(pdf_bytes),
@@ -973,9 +1180,13 @@ async def setup_import(req: SetupImportRequest):
         doc.zone_order,
     )
     try:
-        pdf_bytes = compiler.compile(assembled, project_dir=project_dir)
+        async with compile_semaphore:
+            pdf_bytes = await compiler.compile_async(
+                assembled, project_dir=project_dir
+            )
         pdf_b64 = _pdf_b64(pdf_bytes)
         log.info("setup.import: compile ok pdf_bytes=%s", len(pdf_bytes))
+
     except CompilationError as e:
         tip = _tectonic_crash_tip(e.logs or "")
         compile_error = f"Tectonic failed: {e.message}. {(e.logs or '')[:500]}{tip}"
@@ -1004,13 +1215,20 @@ async def setup_import(req: SetupImportRequest):
 
 
 @app.post("/sessions")
-async def create_session(req: CreateSessionRequest):
+async def create_session(
+    req: CreateSessionRequest,
+    authorization: Optional[str] = Header(default=None),
+):
     """
     Create a chat base from either:
     - template URL / pasted latex (`source_url` or `latex`), or
     - bundled template + optional zone selection (`template_name`,
       `included_zone_nos` / `zone_order` / `custom_zones`).
     """
+    user = _get_current_user(
+        authorization, required=config.REQUIRE_AUTH_FOR_SESSIONS
+    )
+    username = user.username if user else None
     provider = req.provider or config.LLM_PROVIDER
     model = req.model or config.MODEL_NAME
 
@@ -1018,11 +1236,12 @@ async def create_session(req: CreateSessionRequest):
     has_latex = bool((req.latex or "").strip())
     project_dir: Optional[str] = None
     log.info(
-        "session.create: url=%s latex=%s template=%s included=%s",
+        "session.create: url=%s latex=%s template=%s included=%s user=%s",
         has_url,
         has_latex,
         req.template_name,
         req.included_zone_nos,
+        username or "anonymous",
     )
     compat_notes: List[str] = []
     if has_url or has_latex:
@@ -1073,11 +1292,13 @@ async def create_session(req: CreateSessionRequest):
         except Exception:
             pass
     session = session_store.create(
+        username=username,
         template_name=req.template_name,
         title=req.title or "New resume chat",
         latex_code=assembled,
         provider=provider,
         model=model,
+
         header=doc.header,
         footer=doc.footer,
         zones=[z.model_dump() for z in doc.zones],
@@ -1108,11 +1329,19 @@ async def create_session(req: CreateSessionRequest):
 
 
 @app.post("/sessions/{session_id}/setup")
-async def confirm_session_setup(session_id: str, req: SessionSetupRequest):
+async def confirm_session_setup(
+    session_id: str,
+    req: SessionSetupRequest,
+    authorization: Optional[str] = Header(default=None),
+):
     session = session_store.get(session_id)
     if not session:
         log.error("session.setup: not found id=%s", session_id)
         raise HTTPException(status_code=404, detail="Session not found")
+    user = _get_current_user(
+        authorization, required=config.REQUIRE_AUTH_FOR_SESSIONS
+    )
+    _check_session_access(session, user)
     log.info(
         "session.setup: id=%s included=%s order=%s",
         session_id,
@@ -1152,11 +1381,19 @@ async def confirm_session_setup(session_id: str, req: SessionSetupRequest):
 
 
 @app.post("/sessions/{session_id}/zones")
-async def add_session_zone(session_id: str, req: AddZoneRequest):
+async def add_session_zone(
+    session_id: str,
+    req: AddZoneRequest,
+    authorization: Optional[str] = Header(default=None),
+):
     session = session_store.get(session_id)
     if not session:
         log.error("zones.add: session not found id=%s", session_id)
         raise HTTPException(status_code=404, detail="Session not found")
+    user = _get_current_user(
+        authorization, required=config.REQUIRE_AUTH_FOR_SESSIONS
+    )
+    _check_session_access(session, user)
     log.info(
         "zones.add.step: id=%s desc=%s after=%s at_start=%s",
         session_id,
@@ -1190,11 +1427,19 @@ async def add_session_zone(session_id: str, req: AddZoneRequest):
 
 
 @app.delete("/sessions/{session_id}/zones/{zone_no}")
-async def remove_session_zone(session_id: str, zone_no: int):
+async def remove_session_zone(
+    session_id: str,
+    zone_no: int,
+    authorization: Optional[str] = Header(default=None),
+):
     session = session_store.get(session_id)
     if not session:
         log.error("zones.remove: session not found id=%s", session_id)
         raise HTTPException(status_code=404, detail="Session not found")
+    user = _get_current_user(
+        authorization, required=config.REQUIRE_AUTH_FOR_SESSIONS
+    )
+    _check_session_access(session, user)
     doc = document_from_session(session)
     if doc is None:
         log.error("zones.remove: no zone document id=%s", session_id)
@@ -1220,11 +1465,19 @@ async def remove_session_zone(session_id: str, zone_no: int):
 
 
 @app.patch("/sessions/{session_id}/zone-order")
-async def patch_zone_order(session_id: str, req: ZoneOrderRequest):
+async def patch_zone_order(
+    session_id: str,
+    req: ZoneOrderRequest,
+    authorization: Optional[str] = Header(default=None),
+):
     session = session_store.get(session_id)
     if not session:
         log.error("zones.order: session not found id=%s", session_id)
         raise HTTPException(status_code=404, detail="Session not found")
+    user = _get_current_user(
+        authorization, required=config.REQUIRE_AUTH_FOR_SESSIONS
+    )
+    _check_session_access(session, user)
     doc = document_from_session(session)
     if doc is None:
         log.error("zones.order: no zone document id=%s", session_id)
@@ -1247,30 +1500,61 @@ async def patch_zone_order(session_id: str, req: ZoneOrderRequest):
 
 
 @app.get("/sessions")
-async def list_sessions():
-    return {"sessions": session_store.list_sessions()}
+async def list_sessions(
+    authorization: Optional[str] = Header(default=None),
+):
+    user = _get_current_user(
+        authorization, required=config.REQUIRE_AUTH_FOR_SESSIONS
+    )
+    username = user.username if user else None
+    return {"sessions": session_store.list_sessions(username=username)}
 
 
 @app.get("/sessions/{session_id}")
-async def get_session(session_id: str):
+async def get_session(
+    session_id: str,
+    authorization: Optional[str] = Header(default=None),
+):
     session = session_store.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    user = _get_current_user(
+        authorization, required=config.REQUIRE_AUTH_FOR_SESSIONS
+    )
+    _check_session_access(session, user)
     return session.model_dump()
 
 
 @app.delete("/sessions/{session_id}")
-async def delete_session(session_id: str):
+async def delete_session(
+    session_id: str,
+    authorization: Optional[str] = Header(default=None),
+):
+    session = session_store.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    user = _get_current_user(
+        authorization, required=config.REQUIRE_AUTH_FOR_SESSIONS
+    )
+    _check_session_access(session, user)
     if not session_store.delete(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
     return {"ok": True}
 
 
 @app.patch("/sessions/{session_id}/model")
-async def patch_session_model(session_id: str, req: ModelPatchRequest):
+async def patch_session_model(
+    session_id: str,
+    req: ModelPatchRequest,
+    authorization: Optional[str] = Header(default=None),
+):
     session = session_store.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    user = _get_current_user(
+        authorization, required=config.REQUIRE_AUTH_FOR_SESSIONS
+    )
+    _check_session_access(session, user)
     provider = req.provider.strip().lower()
     if provider not in SUPPORTED_PROVIDERS:
         raise HTTPException(
@@ -1290,10 +1574,18 @@ async def patch_session_model(session_id: str, req: ModelPatchRequest):
 
 
 @app.put("/sessions/{session_id}/latex")
-async def put_session_latex(session_id: str, req: LatexPutRequest):
+async def put_session_latex(
+    session_id: str,
+    req: LatexPutRequest,
+    authorization: Optional[str] = Header(default=None),
+):
     session = session_store.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    user = _get_current_user(
+        authorization, required=config.REQUIRE_AUTH_FOR_SESSIONS
+    )
+    _check_session_access(session, user)
     raw = req.latex_code or ""
     soft, compat_notes = soften_latex_for_tectonic(raw)
     latex = ensure_full_document(soft)
@@ -1338,6 +1630,11 @@ async def chat(
     if not session:
         log.error("chat: session not found id=%s", req.session_id)
         raise HTTPException(status_code=404, detail="Session not found")
+    user = _get_current_user(
+        authorization, required=config.REQUIRE_AUTH_FOR_SESSIONS
+    )
+    _check_session_access(session, user)
+
 
     if req.template_name:
         session.template_name = req.template_name
@@ -1404,6 +1701,8 @@ async def chat(
         session, role="user", content=req.message
     )
     session = session_store.get(req.session_id)
+    # Capture the user message ID so we can tag the undo snapshot later
+    user_msg_id = session.messages[-1].id if session.messages else None
 
     if session.title == "New resume chat" and req.message.strip():
         session.title = req.message.strip()[:80]
@@ -1412,10 +1711,10 @@ async def chat(
     history = [m.model_dump() for m in session.messages[:-1]]
 
     try:
-        # Persist a rollback snapshot before the orchestrator edits any zone.
-        # If the resulting LaTeX fails to compile, rollback_to_snapshot()
-        # restores the last-good state automatically.
-        take_snapshot(session, session_store)
+        # Push an undo snapshot before the orchestrator edits any zone.
+        # push_turn_snapshot also fills the legacy single-slot snapshot fields
+        # so rollback_to_snapshot() still works for compile-failure auto-rollback.
+        undo_snap = push_turn_snapshot(session, session_store)
         log.info("chat.step: run_chat_turn …")
         result = ai_agent.run_chat_turn(
             user_message=req.message,
@@ -1463,7 +1762,7 @@ async def chat(
     if result.zones_changed or (is_first_fill and result.route == "orchestrator"):
         log.info("chat.step: compile after zone changes …")
         try:
-            pdf_bytes, final_latex = compile_with_retry(
+            pdf_bytes, final_latex = await compile_with_retry(
                 final_latex,
                 provider=provider,
                 model=model,
@@ -1471,6 +1770,7 @@ async def chat(
                 project_dir=getattr(session, "project_dir", None),
             )
             pdf_b64 = _pdf_b64(pdf_bytes)
+
             log.info("chat.step: compile ok pdf_bytes=%s", len(pdf_bytes))
             # Keep assembled latex if compile fixer rewrote full doc
             session.latex_code = final_latex
@@ -1533,6 +1833,13 @@ async def chat(
     )
     session = session_store.get(req.session_id)
 
+    # Tag the undo snapshot with both message IDs now that we know them
+    asst_msg_id = session.messages[-1].id if session.messages else None
+    snap_msg_ids = [i for i in [user_msg_id, asst_msg_id] if i]
+    if snap_msg_ids:
+        tag_turn_snapshot(session, undo_snap, snap_msg_ids, session_store)
+        session = session_store.get(req.session_id)
+
     return {
         "session": session.model_dump(),
         "reply": result.reply,
@@ -1545,6 +1852,7 @@ async def chat(
         "model": result.model,
         "tool_trace": result.tool_trace,
         "route": result.route,
+        "undo_depth": len(session.turn_history),
         "catalog": [
             {
                 "zone_no": z.get("zone_no"),
@@ -1556,6 +1864,61 @@ async def chat(
     }
 
 
+# ---------- Session undo ----------
+
+
+@app.post("/sessions/{session_id}/undo")
+async def undo_last_turn(
+    session_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Pop the last undo snapshot, restore LaTeX + zones, and recompile."""
+    session = session_store.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    user = _get_current_user(
+        authorization, required=config.REQUIRE_AUTH_FOR_SESSIONS
+    )
+    _check_session_access(session, user)
+
+    snap = pop_turn_snapshot(session, session_store)
+    if not snap:
+        raise HTTPException(
+            status_code=400,
+            detail="Nothing to undo in this session",
+        )
+
+    session = session_store.get(session_id) or session
+
+    pdf_b64: Optional[str] = None
+    compile_err: Optional[str] = None
+    if session.latex_code:
+        try:
+            async with compile_semaphore:
+                pdf_bytes = await compiler.compile_async(
+                    session.latex_code,
+                    project_dir=session.project_dir,
+                )
+            pdf_b64 = _pdf_b64(pdf_bytes)
+        except CompilationError as e:
+            log.warning("undo.compile: compilation error - %s", e)
+            compile_err = str(e)
+        except Exception as e:
+            log.warning("undo.compile: unexpected error - %s", e)
+            compile_err = str(e)
+
+    return {
+        "ok": True,
+        "session": session.model_dump(),
+        "latex_code": session.latex_code,
+        "pdf_base64": pdf_b64,
+        "compile_error": compile_err,
+        "undo_depth": len(session.turn_history),
+        "zones": session.zones or [],
+        "zone_order": session.zone_order or [],
+    }
+
+
 @app.post("/chat/apply")
 async def chat_apply_proposal(
     req: ApplyChatProposalRequest,
@@ -1564,6 +1927,10 @@ async def chat_apply_proposal(
     session = session_store.get(req.session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    user = _get_current_user(
+        authorization, required=config.REQUIRE_AUTH_FOR_SESSIONS
+    )
+    _check_session_access(session, user)
     provider, model = _resolve_llm(req.provider, req.model, session)
     api_key = _resolve_api_key(
         provider=provider,
@@ -1621,12 +1988,13 @@ async def chat_apply_proposal(
         log.warning("chat/apply: classic template compile warning")
 
     try:
-        pdf_bytes, latex = compile_with_retry(
+        pdf_bytes, latex = await compile_with_retry(
             latex,
             provider=provider,
             model=model,
             api_key=api_key,
         )
+
         pdf_b64 = _pdf_b64(pdf_bytes)
         compile_error = None
         log.info("chat/apply: compile ok pdf_bytes=%s", len(pdf_bytes))
