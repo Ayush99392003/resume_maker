@@ -40,23 +40,29 @@ def _hash_password(password: str, salt: str) -> str:
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
-    """Write text atomically via temporary file and os.replace."""
+    """Write text atomically via temporary file, with fallback for FUSE."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=str(path.parent),
-        delete=False,
-        suffix=".tmp",
-    ) as tf:
-        tf.write(content)
-        temp_path = Path(tf.name)
+    temp_path: Optional[Path] = None
     try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(path.parent),
+            delete=False,
+            suffix=".tmp",
+        ) as tf:
+            tf.write(content)
+            temp_path = Path(tf.name)
         os.replace(temp_path, path)
     except Exception:
-        if temp_path.exists():
-            temp_path.unlink()
-        raise
+        # Direct write fallback for FUSE mounts (e.g., GCS FUSE on Cloud Run)
+        path.write_text(content, encoding="utf-8")
+    finally:
+        if temp_path and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------

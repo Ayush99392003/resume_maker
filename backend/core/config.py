@@ -49,3 +49,12 @@ REQUIRE_AUTH_FOR_SESSIONS = os.getenv(
     "REQUIRE_AUTH_FOR_SESSIONS", "1"
 ).strip().lower() in ("1", "true", "yes")
 
+# PDF Compilation Caching (SHA-256 content-addressable cache)
+PDF_CACHE_ENABLED = os.getenv(
+    "PDF_CACHE_ENABLED", "1"
+).strip().lower() in ("1", "true", "yes")
+PDF_CACHE_DIR = os.getenv("PDF_CACHE_DIR", "").strip()
+
+# Redis Configuration (for rate limiting, pub/sub, queues)
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0").strip()
+

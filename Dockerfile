@@ -13,7 +13,7 @@ RUN npm run build
 # ==========================================
 # Stage 2: Production Backend & Runtime
 # ==========================================
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfontconfig1 \
     libgraphite2-3 \
     libharfbuzz0b \
-    libicu72 \
+    libssl3 \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -58,6 +58,7 @@ RUN useradd -m -u 1000 appuser && \
 USER appuser
 
 WORKDIR /app/backend
-EXPOSE 8001
+ENV WORKERS=4 \
+    PORT=8001
 
-CMD ["python", "main.py"]
+CMD ["sh", "-c", "gunicorn -k uvicorn.workers.UvicornWorker -w ${WORKERS:-4} --bind 0.0.0.0:${PORT:-8001} --timeout 120 --graceful-timeout 30 main:app"]

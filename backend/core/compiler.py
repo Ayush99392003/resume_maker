@@ -3,19 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
-
 try:
-    from core.logging_setup import get_logger
+    from core import config
     from core.latex_soften import soften_latex_for_tectonic
+    from core.logging_setup import get_logger
 except ImportError:
-    from .logging_setup import get_logger
+    from . import config
     from .latex_soften import soften_latex_for_tectonic
+    from .logging_setup import get_logger
 
 log = get_logger("compiler")
 
@@ -31,6 +33,17 @@ class CompilationError(Exception):
 
 def _backend_root() -> Path:
     return Path(__file__).resolve().parent.parent
+
+
+def _pdf_cache_dir() -> Path:
+    """Return directory for cached compiled PDFs."""
+    configured = getattr(config, "PDF_CACHE_DIR", "")
+    if configured:
+        p = Path(configured)
+    else:
+        p = _backend_root() / "data" / "cache" / "pdf"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 def _resolve_tectonic_path() -> str:
@@ -183,10 +196,10 @@ class TectonicCompiler:
             log.error(
                 "tectonic missing path=%s", self.tectonic_path
             )
-            raise Exception(
-                "Tectonic not found. Install it or place tectonic.exe in "
-                "backend/bin/. See https://tectonic-typesetting.github.io/"
-                "book/latest/installation/"
+            raise CompilationError(
+                "Tectonic not found",
+                logs="Install it or place tectonic.exe in backend/bin/. "
+                "See https://tectonic-typesetting.github.io/book/latest/installation/",
             )
 
     def compile(self, latex_code: str, *, project_dir: str | None = None) -> bytes:
@@ -197,6 +210,27 @@ class TectonicCompiler:
         into that directory and compile there so .cls/.sty/images resolve.
         """
         code, _ = soften_latex_for_tectonic(latex_code or "")
+        use_cache = (
+            getattr(config, "PDF_CACHE_ENABLED", True) and not project_dir
+        )
+        cache_key = ""
+        cache_file = None
+        if use_cache:
+            cache_key = hashlib.sha256(code.encode("utf-8")).hexdigest()
+            cache_file = _pdf_cache_dir() / f"{cache_key}.pdf"
+            if cache_file.exists():
+                try:
+                    pdf_data = cache_file.read_bytes()
+                    if pdf_data:
+                        log.info(
+                            "compile.cache_hit sha=%s bytes=%s",
+                            cache_key[:12],
+                            len(pdf_data),
+                        )
+                        return pdf_data
+                except (OSError, ValueError) as cache_err:
+                    log.warning("compile.cache_read_error %s", cache_err)
+
         log.info(
             "compile.step: start chars=%s project_dir=%s",
             len(code),
@@ -228,7 +262,20 @@ class TectonicCompiler:
             pdf_file = tmp_path / "resume.pdf"
             if not pdf_file.exists():
                 raise CompilationError("No PDF.", logs="No PDF found.")
-            return pdf_file.read_bytes()
+            pdf_bytes = pdf_file.read_bytes()
+            if use_cache and cache_file:
+                try:
+                    tmp_cache = cache_file.with_suffix(".tmp")
+                    tmp_cache.write_bytes(pdf_bytes)
+                    os.replace(tmp_cache, cache_file)
+                    log.info(
+                        "compile.cache_saved sha=%s bytes=%s",
+                        cache_key[:12],
+                        len(pdf_bytes),
+                    )
+                except (OSError, ValueError) as save_err:
+                    log.warning("compile.cache_save_error %s", save_err)
+            return pdf_bytes
 
     async def compile_async(
         self, latex_code: str, *, project_dir: str | None = None

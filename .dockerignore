@@ -13,3 +13,6 @@ dist
 backend/temp/*
 backend/data/*
 !backend/data/.gitkeep
+test_results
+scratch
+tests
