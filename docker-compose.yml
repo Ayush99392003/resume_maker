@@ -1,35 +1,31 @@
 version: '3.8'
 
 services:
-  # Backend FastAPI service
-  backend:
+  resume-maker:
     build:
       context: .
-      dockerfile: Dockerfile.backend
+      dockerfile: Dockerfile
+    container_name: resume-maker-app
     ports:
-      - "8000:8000"
-    volumes:
-      - ./backend:/app
-      - ./backend/data:/app/data
-    env_file:
-      - .env
+      - "8001:8001"
     environment:
-      - PYTHONUNBUFFERED=1
-    networks:
-      - resume-net
+      - PORT=8001
+      - LOG_LEVEL=INFO
+      - SESSION_SECRET=${SESSION_SECRET:-super-secret-default-key-change-in-prod}
+      - REQUIRE_AUTH_FOR_SESSIONS=true
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    volumes:
+      - resume-data:/app/backend/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-  # Frontend React service
-  frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile.frontend
-    ports:
-      - "3000:80"
-    depends_on:
-      - backend
-    networks:
-      - resume-net
-
-networks:
-  resume-net:
-    driver: bridge
+volumes:
+  resume-data:
+    driver: local

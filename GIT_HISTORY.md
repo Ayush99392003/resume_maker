@@ -4,11 +4,16 @@
 **Theme:** Multi-User Architecture, Session Isolation & Concurrency Guardrails
 
 ### Git Commits
-- [`7a7a824`](#) — `feat(concurrency): implement multi-user session isolation and compile throttling`
-  - **Session Isolation:** Attached ownership verification (`session.username`) to session creation, listing, retrieval, and LaTeX updates.
-  - **Compile Concurrency Limiter:** Introduced `asyncio.Semaphore(2)` (`compile_semaphore`) to prevent resource exhaustion when multiple users invoke Tectonic concurrently.
-  - **Token Atomic Persistence:** Implemented safe atomic write routines for user token authentication in `auth_store.py`.
-  - **Automated Verification:** Added [`tests/test_multi_user_concurrency.py`](tests/test_multi_user_concurrency.py) testing concurrent compile safety, token persistence, and cross-user session leakage prevention.
+1. [`7a7a824`](#) — `feat(concurrency): implement multi-user session isolation and compile throttling`
+   - **Session Isolation:** Attached ownership verification (`session.username`) to session creation, listing, retrieval, and LaTeX updates.
+   - **Compile Concurrency Limiter:** Introduced `asyncio.Semaphore(2)` (`compile_semaphore`) to prevent resource exhaustion when multiple users invoke Tectonic concurrently.
+   - **Token Atomic Persistence:** Implemented safe atomic write routines for user token authentication in `auth_store.py`.
+   - **Automated Verification:** Added [`tests/test_multi_user_concurrency.py`](tests/test_multi_user_concurrency.py) testing concurrent compile safety, token persistence, and cross-user session leakage prevention.
+
+2. [`2638346`](#) — `feat(docker): add multi-stage production Dockerfile and docker-compose deployment`
+   - **Multi-Stage Container:** Node 20 builder stage for frontend compilation + Python 3.11-slim production runtime with Tectonic and fontconfig.
+   - **Container Orchestration:** Added `docker-compose.yml` with persistent volume mount (`resume-data`) and health check endpoints.
+   - **Security:** Non-root execution user `appuser` and comprehensive `.dockerignore`.
 
 ---
 
