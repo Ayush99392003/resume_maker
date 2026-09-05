@@ -2,6 +2,10 @@
   "framework": "vite",
   "rewrites": [
     {
+      "source": "/api/(.*)",
+      "destination": "https://resume-backend-460367008482.us-central1.run.app/$1"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }
