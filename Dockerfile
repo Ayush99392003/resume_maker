@@ -30,12 +30,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libharfbuzz0b \
     libssl3 \
     ca-certificates \
+    tar \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Tectonic binary
-RUN curl --proto '=https' --tlsv1.2 -fsSL https://drop-sh.fullyjustified.net | sh \
-    && mv tectonic /usr/local/bin/tectonic \
-    && chmod +x /usr/local/bin/tectonic
+# Install Tectonic binary (statically linked musl release to prevent GLIBC version mismatch on Debian Bookworm)
+ARG TECTONIC_VERSION=0.17.0
+RUN set -eux; \
+    ARCH="$(uname -m)"; \
+    case "$ARCH" in \
+        x86_64) TECTONIC_ARCH="x86_64-unknown-linux-musl" ;; \
+        aarch64|arm64) TECTONIC_ARCH="aarch64-unknown-linux-musl" ;; \
+        *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%40${TECTONIC_VERSION}/tectonic-${TECTONIC_VERSION}-${TECTONIC_ARCH}.tar.gz" \
+        | tar -xz -C /usr/local/bin/; \
+    chmod +x /usr/local/bin/tectonic; \
+    tectonic --version
 
 # Install Python dependencies
 COPY backend/requirements.txt /app/backend/
