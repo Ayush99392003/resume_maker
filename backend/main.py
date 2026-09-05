@@ -131,7 +131,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=r"https?://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -701,6 +701,11 @@ async def save_provider_config(
     _set("model_id", req.model_id)
 
     user = auth_store.set_provider_config(user, p, existing)
+    model_name = existing.model or existing.model_id
+    if model_name:
+        user.default_model = model_name
+    user.default_provider = p
+    user = auth_store.save_user(user)
     log.info(
         "auth: saved provider config user=%s provider=%s fields=%s",
         user.username,

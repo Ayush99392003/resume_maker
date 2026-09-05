@@ -15,7 +15,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 const PROVIDER_MODELS = {
   groq: ['openai/gpt-oss-120b', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'],
   openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1'],
-  gemini: ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash'],
+  gemini: ['gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'],
   anthropic: ['claude-3-5-sonnet-latest', 'claude-3-5-haiku-latest'],
   azure: ['gpt-4o'],
   aws: ['anthropic.claude-3-5-sonnet-20240620-v1:0'],
@@ -135,9 +135,9 @@ export default function App() {
 
   // Provider-specific field schemas
   const PROVIDER_FIELDS = {
-    groq:      [{ k: 'api_key', label: 'API Key', type: 'password' }, { k: 'model', label: 'Model', type: 'text', placeholder: 'llama-3.3-70b-versatile' }],
+    groq:      [{ k: 'api_key', label: 'API Key', type: 'password' }, { k: 'model', label: 'Model', type: 'text', placeholder: 'openai/gpt-oss-120b' }],
     openai:    [{ k: 'api_key', label: 'API Key', type: 'password' }, { k: 'model', label: 'Model', type: 'text', placeholder: 'gpt-4o' }],
-    gemini:    [{ k: 'api_key', label: 'API Key', type: 'password' }, { k: 'model', label: 'Model', type: 'text', placeholder: 'gemini-1.5-pro' }],
+    gemini:    [{ k: 'api_key', label: 'API Key', type: 'password' }, { k: 'model', label: 'Model', type: 'text', placeholder: 'gemini-3.5-flash-lite' }],
     anthropic: [{ k: 'api_key', label: 'API Key', type: 'password' }, { k: 'model', label: 'Model', type: 'text', placeholder: 'claude-3-5-sonnet-latest' }],
     azure: [
       { k: 'api_key',     label: 'API Key',         type: 'password' },
@@ -177,6 +177,11 @@ export default function App() {
       setProviderStatus((prev) => ({ ...prev, [prov]: resp.data }));
       setProviderDraft((prev) => ({ ...prev, [prov]: {} }));
       setProviderSaved(true);
+      if (resp.data.model) {
+        if (prov === provider) {
+          setModel(resp.data.model);
+        }
+      }
       setTimeout(() => setProviderSaved(false), 1800);
     } catch (e) {
       setProviderError(errDetail(e, 'Could not save credentials'));
@@ -585,9 +590,15 @@ export default function App() {
   }, [latexCode, sessionId]);
 
   useEffect(() => {
-    const models = PROVIDER_MODELS[provider] || [];
-    if (models.length && !models.includes(model)) setModel(models[0]);
-  }, [provider, model]);
+    const savedModel = providerStatus[provider]?.model;
+    const models = Array.from(new Set([
+      ...(savedModel ? [savedModel] : []),
+      ...(PROVIDER_MODELS[provider] || []),
+    ]));
+    if (models.length && !models.includes(model)) {
+      setModel(savedModel || models[0]);
+    }
+  }, [provider, model, providerStatus]);
 
   const handleAuth = async () => {
     setAuthError('');
@@ -832,7 +843,12 @@ export default function App() {
     a.click();
   };
 
-  const modelOptions = PROVIDER_MODELS[provider] || [model];
+  const savedModel = providerStatus[provider]?.model;
+  const modelOptions = Array.from(new Set([
+    ...(savedModel ? [savedModel] : []),
+    ...(PROVIDER_MODELS[provider] || []),
+    ...(model ? [model] : []),
+  ]));
 
   if (bootstrapping) {
     return (
@@ -1694,11 +1710,16 @@ export default function App() {
                     return (
                       <>
                         <div className="flex items-center justify-between">
-                          <p className="text-xs text-ink-500 leading-relaxed">
+                          <p className="text-xs text-ink-500 leading-relaxed flex items-center flex-wrap gap-1.5">
                             {st?.configured
                               ? <span className="text-accent font-semibold">✓ Configured</span>
                               : <span className="text-amber-700 font-semibold">Not configured</span>}
-                            {st?.hint && <span className="ml-2 text-ink-400 font-mono text-[10px]">{st.hint}</span>}
+                            {st?.hint && <span className="text-ink-400 font-mono text-[10px]">{st.hint}</span>}
+                            {st?.model && (
+                              <span className="text-accent font-mono text-[10px] bg-accent/10 px-1.5 py-0.5 rounded font-medium">
+                                model: {st.model}
+                              </span>
+                            )}
                           </p>
                           {st?.configured && (
                             <button
@@ -1715,27 +1736,41 @@ export default function App() {
                           Leave blank to keep saved values. Only filled fields are updated.
                         </p>
 
-                        {fields.map((f) => (
-                          <label key={f.k} className="block space-y-1.5">
-                            <span className="text-xs font-medium text-ink-600">{f.label}</span>
-                            <input
-                              type={f.type}
-                              autoComplete="new-password"
-                              autoCorrect="off"
-                              spellCheck={false}
-                              name={`${p}-${f.k}`}
-                              value={draft[f.k] || ''}
-                              onChange={(e) =>
-                                setProviderDraft((prev) => ({
-                                  ...prev,
-                                  [p]: { ...(prev[p] || {}), [f.k]: e.target.value },
-                                }))
-                              }
-                              placeholder={f.placeholder || (st?.configured ? '•••••••• (paste to replace)' : '')}
-                              className="w-full px-3 py-2 rounded-md border border-ink-200 text-sm outline-none focus:border-accent font-mono"
-                            />
-                          </label>
-                        ))}
+                        {fields.map((f) => {
+                          const isPassword = f.type === 'password';
+                          const savedVal = f.k === 'model' ? (st?.model || '') : (st?.[f.k] || '');
+                          const displayVal = draft[f.k] !== undefined ? draft[f.k] : (isPassword ? '' : savedVal);
+                          const placeholderText = isPassword
+                            ? (st?.configured ? '•••••••• (paste to replace)' : (f.placeholder || ''))
+                            : (savedVal || f.placeholder || '');
+
+                          return (
+                            <label key={f.k} className="block space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <span className="text-xs font-medium text-ink-600">{f.label}</span>
+                                {!isPassword && savedVal && (
+                                  <span className="text-[10px] text-ink-400 font-mono">Current: {savedVal}</span>
+                                )}
+                              </div>
+                              <input
+                                type={f.type}
+                                autoComplete={isPassword ? 'new-password' : 'off'}
+                                autoCorrect="off"
+                                spellCheck={false}
+                                name={`${p}-${f.k}`}
+                                value={displayVal}
+                                onChange={(e) =>
+                                  setProviderDraft((prev) => ({
+                                    ...prev,
+                                    [p]: { ...(prev[p] || {}), [f.k]: e.target.value },
+                                  }))
+                                }
+                                placeholder={placeholderText}
+                                className="w-full px-3 py-2 rounded-md border border-ink-200 text-sm outline-none focus:border-accent font-mono"
+                              />
+                            </label>
+                          );
+                        })}
 
                         {providerError && (
                           <p className="text-sm text-red-700 bg-red-50 border border-red-100 rounded-md px-3 py-2">{providerError}</p>

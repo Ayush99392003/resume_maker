@@ -1,9 +1,11 @@
-"""Google Gemini provider."""
+"""Google Gemini provider using google-genai SDK and Interactions API."""
 
 from __future__ import annotations
 
+import json
 import os
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Type
+from pydantic import BaseModel
 
 from .base import ChatMessage, LLMProvider, LLMResponse
 
@@ -13,26 +15,47 @@ class GeminiProvider(LLMProvider):
 
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
-        self._configured = False
+        self._client: Any = None
 
-    def _genai(self):
-        try:
-            import google.generativeai as genai
-        except ImportError as e:
-            raise ImportError(
-                "Install google-generativeai: pip install google-generativeai"
-            ) from e
-        return genai
+    def _get_client(self) -> Any:
+        if self._client is None:
+            self.ensure_configured()
+            from google import genai
+
+            self._client = genai.Client(api_key=self.api_key)
+        return self._client
 
     def ensure_configured(self) -> None:
         if not self.api_key:
             raise ValueError(
                 "GEMINI_API_KEY is required when LLM_PROVIDER=gemini"
             )
-        if not self._configured:
-            genai = self._genai()
-            genai.configure(api_key=self.api_key)
-            self._configured = True
+
+    def _prepare_messages(
+        self, messages: List[ChatMessage]
+    ) -> Tuple[Optional[str], str]:
+        sys_parts = [m.content for m in messages if m.role == "system"]
+        sys_instruction = "\n\n".join(sys_parts) if sys_parts else None
+
+        non_system = [m for m in messages if m.role != "system"]
+        if not non_system:
+            raise ValueError(
+                "No user/assistant messages provided to Gemini"
+            )
+
+        if len(non_system) == 1:
+            input_text = non_system[0].content
+        else:
+            turns = []
+            for m in non_system[:-1]:
+                role = "User" if m.role == "user" else "Assistant"
+                turns.append(f"{role}: {m.content}")
+            input_text = (
+                "Previous conversation:\n"
+                + "\n".join(turns)
+                + f"\n\nCurrent request:\n{non_system[-1].content}"
+            )
+        return sys_instruction, input_text
 
     def chat(
         self,
@@ -42,45 +65,75 @@ class GeminiProvider(LLMProvider):
         temperature: float = 0.4,
         response_format: Optional[str] = None,
     ) -> LLMResponse:
-        self.ensure_configured()
-        genai = self._genai()
+        client = self._get_client()
+        sys_instruction, input_text = self._prepare_messages(messages)
 
-        system_parts = [m.content for m in messages if m.role == "system"]
-        history = []
-        for m in messages:
-            if m.role == "system":
-                continue
-            role = "user" if m.role == "user" else "model"
-            # Gemini alternates user/model; merge consecutive same roles
-            if history and history[-1]["role"] == role:
-                history[-1]["parts"][0] += "\n" + m.content
-            else:
-                history.append({"role": role, "parts": [m.content]})
+        resolved_model = model or "gemini-3.5-flash-lite"
+        if resolved_model.startswith("models/"):
+            resolved_model = resolved_model[len("models/"):]
 
-        generation_config = {"temperature": temperature}
+        kwargs: Dict[str, Any] = {
+            "model": resolved_model,
+            "input": input_text,
+        }
+        if sys_instruction:
+            kwargs["system_instruction"] = sys_instruction
+
         if response_format == "json":
-            generation_config["response_mime_type"] = "application/json"
+            kwargs["response_format"] = {"type": "object"}
 
-        gm = genai.GenerativeModel(
-            model_name=model,
-            system_instruction="\n\n".join(system_parts) if system_parts else None,
-            generation_config=generation_config,
-        )
+        res = client.interactions.create(**kwargs)
+        content = getattr(res, "output_text", "") or ""
 
-        if not history:
-            raise ValueError("No user/assistant messages provided to Gemini")
+        usage: Dict[str, Any] = {}
+        if hasattr(res, "usage") and res.usage:
+            u = res.usage
+            usage = {
+                "prompt_tokens": getattr(u, "total_input_tokens", 0),
+                "completion_tokens": getattr(u, "total_output_tokens", 0),
+            }
 
-        # Last message is the prompt; prior are history
-        if len(history) == 1:
-            resp = gm.generate_content(history[0]["parts"][0])
-        else:
-            chat = gm.start_chat(history=history[:-1])
-            resp = chat.send_message(history[-1]["parts"][0])
-
-        content = getattr(resp, "text", None) or ""
         return LLMResponse(
             content=content,
             provider=self.name,
-            model=model,
-            raw=resp,
+            model=resolved_model,
+            raw=res,
+            usage=usage,
         )
+
+    def chat_model(
+        self,
+        messages: List[ChatMessage],
+        response_model: Type[BaseModel],
+        *,
+        model: str,
+        temperature: float = 0.4,
+    ) -> BaseModel:
+        client = self._get_client()
+        sys_instruction, input_text = self._prepare_messages(messages)
+
+        resolved_model = model or "gemini-3.5-flash-lite"
+        if resolved_model.startswith("models/"):
+            resolved_model = resolved_model[len("models/"):]
+
+        kwargs: Dict[str, Any] = {
+            "model": resolved_model,
+            "input": input_text,
+            "response_format": response_model.model_json_schema(),
+        }
+        if sys_instruction:
+            kwargs["system_instruction"] = sys_instruction
+
+        res = client.interactions.create(**kwargs)
+        output_text = getattr(res, "output_text", "") or "{}"
+        try:
+            data = json.loads(output_text)
+            return response_model.model_validate(data)
+        except Exception:
+            cleaned = output_text.strip()
+            if cleaned.startswith("```"):
+                cleaned = (
+                    cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                )
+            return response_model.model_validate_json(cleaned)
+
