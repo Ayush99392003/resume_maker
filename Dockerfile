@@ -71,4 +71,4 @@ WORKDIR /app/backend
 ENV WORKERS=4 \
     PORT=8001
 
-CMD ["sh", "-c", "gunicorn -k uvicorn.workers.UvicornWorker -w ${WORKERS:-4} --bind 0.0.0.0:${PORT:-8001} --timeout 120 --graceful-timeout 30 main:app"]
+CMD ["sh", "-c", "gunicorn -k uvicorn.workers.UvicornWorker -w ${WORKERS:-4} --bind 0.0.0.0:${PORT:-8001} --timeout 300 --graceful-timeout 30 main:app"]
