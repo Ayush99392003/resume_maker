@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -189,8 +190,6 @@ def plan_intents(
             )
 
     def _looks_unfilled() -> bool:
-        if not doc.zones:
-            return True
         for z in doc.zones:
             inner = doc.zone_inner(z.zone_no)
             if "[[" in inner or inner.strip() in {"", "% empty zone", "% TODO"}:
@@ -692,73 +691,111 @@ class Orchestrator:
 
             if intent in ("fill", "edit"):
                 targets = step.zone_nos or list(doc.zone_order)
-                for n in targets:
+                cur_intent = intent
+
+                def _process_one_zone(
+                    n: int,
+                    op_intent: str = cur_intent,
+                ) -> tuple[
+                    int,
+                    str | None,
+                    str | None,
+                    str | None,
+                    str | None,
+                    str | None,
+                ]:
                     try:
-                        current = doc.zone_inner(n)
+                        curr = doc.zone_inner(n)
                         z = doc.get_zone(n)
                     except KeyError:
                         log.warning(
-                            "orch.error: %s unknown zone %s", intent, n
+                            "orch.error: %s unknown zone %s", op_intent, n
                         )
-                        continue
+                        return (
+                            n,
+                            None,
+                            None,
+                            None,
+                            None,
+                            f"Unknown zone {n}",
+                        )
 
-                    # Compact 1-line context for other zones to minimize prompt tokens
                     compact_digest = doc.compact_digest(active_zone_no=n)
                     try:
-                        # Primary path: validated ZoneAgent (Pydantic + retry)
-                        content, summary = zone_agent_router.run_zone(
+                        c, s = zone_agent_router.run_zone(
                             zone_no=n,
                             zone_description=z.description,
                             zone_kind=z.kind,
-                            current_zone=current,
+                            current_zone=curr,
                             full_digest=compact_digest,
                             user_message=user_message,
-                            is_initial=(intent == "fill"),
+                            is_initial=(op_intent == "fill"),
                             provider=provider,
                             model=model,
                             api_key=api_key,
                         )
-                        prov = provider or ""
-                        mod = model or ""
+                        return (
+                            n,
+                            c,
+                            s,
+                            provider or "",
+                            model or "",
+                            None,
+                        )
                     except Exception as agent_err:
                         log.warning(
-                            "orch.warning: zone_agent failed zone=%s, "
-                            "falling back to _edit_zone_latex - %s",
+                            "orch.warning: zone_agent failed zone=%s - %s",
                             n,
                             agent_err,
                         )
                         try:
-                            content, summary, prov, mod = _edit_zone_latex(
+                            c, s, p, m = _edit_zone_latex(
                                 zone_no=n,
                                 description=z.description,
-                                current=current,
+                                current=curr,
                                 digest=compact_digest,
                                 user_message=user_message,
-                                is_fill=(intent == "fill"),
+                                is_fill=(op_intent == "fill"),
                                 provider=provider,
                                 model=model,
                                 api_key=api_key,
                             )
+                            return n, c, s, p, m, None
                         except Exception as e:
                             log.exception(
-                                "orch.error: %s zone %s fallback failed - %s",
-                                intent,
+                                "orch.error: %s zone %s fallback failed",
+                                op_intent,
                                 n,
-                                e,
                             )
-                            summaries.append(
-                                f"Zone {n} {intent} failed: {e}"
-                            )
-                            continue
-                    used_provider, used_model = prov, mod
+                            return n, None, None, None, None, str(e)
+
+                if len(targets) > 1:
+                    max_w = min(len(targets), 8)
+                    with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=max_w
+                    ) as pool:
+                        results = list(pool.map(_process_one_zone, targets))
+                else:
+                    results = (
+                        [_process_one_zone(targets[0])] if targets else []
+                    )
+
+                for n, content, summary, prov, mod, err in results:
+                    if err or content is None:
+                        summaries.append(f"Zone {n} {intent} failed: {err}")
+                        continue
+                    if prov:
+                        used_provider = prov
+                    if mod:
+                        used_model = mod
                     doc.set_zone_inner(n, content)
                     changed.append(str(n))
-                    summaries.append(summary)
+                    summaries.append(summary or f"Updated zone {n}")
                     log.info(
                         "orch.step: %s zone=%s summary=%s",
                         intent,
                         n,
-                        summary[:80],
+                        (summary or "")[:80],
                     )
                     trace.append(
                         {
