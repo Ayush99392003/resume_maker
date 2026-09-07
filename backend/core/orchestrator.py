@@ -190,15 +190,34 @@ def plan_intents(
             )
 
     def _looks_unfilled() -> bool:
+        """Return True only when a majority (>=60%) of zones are empty.
+
+        Previously any single empty zone would trigger a full rewrite when
+        the message was long enough.  The new threshold prevents spurious
+        full rewrites when the user pastes a bio on a session that already
+        has most zones filled.
+        """
+        if not doc.zones:
+            return True
+        empty_count = 0
         for z in doc.zones:
             inner = doc.zone_inner(z.zone_no)
-            if "[[" in inner or inner.strip() in {"", "% empty zone", "% TODO"}:
-                return True
-            if inner.strip().startswith("%") and len(inner.strip()) < 40:
-                return True
-        return False
+            if "[[" in inner or inner.strip() in {
+                "",
+                "% empty zone",
+                "% TODO",
+            }:
+                empty_count += 1
+            elif (
+                inner.strip().startswith("%") and len(inner.strip()) < 40
+            ):
+                empty_count += 1
+        # Require >= 60% of zones to be empty to justify a full rewrite
+        threshold = max(1, round(len(doc.zones) * 0.6))
+        return empty_count >= threshold
 
-    if is_first_fill or (len(message) >= 180 and _looks_unfilled()):
+    # Raise length threshold 180 → 250 to reduce accidental full rewrites
+    if is_first_fill or (len(message) >= 250 and _looks_unfilled()):
         return OrchPlan(
             steps=[
                 OrchStep(
