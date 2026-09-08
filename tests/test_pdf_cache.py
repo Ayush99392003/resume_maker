@@ -9,15 +9,18 @@ backend_dir = Path(__file__).resolve().parent.parent / "backend"
 if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
 
+import uuid
+
 from core.compiler import compiler
 
 
 def test_compiler_sha256_caching():
     """Verify that identical LaTeX code reuses cached PDF."""
+    doc_id = uuid.uuid4().hex[:8]
     latex = (
         "\\documentclass{article}\n"
         "\\begin{document}\n"
-        "Cache Test Document 100 Users\n"
+        f"Cache Test Document {doc_id} Users\n"
         "\\end{document}\n"
     )
 
@@ -39,7 +42,7 @@ def test_compiler_sha256_caching():
     assert duration_hit < duration_miss
 
     # 3. Modified LaTeX (cache miss)
-    latex_modified = latex.replace("100 Users", "101 Users")
+    latex_modified = latex.replace(f"{doc_id} Users", f"{doc_id} Mod Users")
     pdf3 = compiler.compile(latex_modified)
     assert pdf3.startswith(b"%PDF")
     assert pdf3 != pdf1
