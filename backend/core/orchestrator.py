@@ -7,6 +7,13 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+# Regex to detect transient provider-level failures that make retrying
+# pointless: rate limits, quota exhaustion, 503/overload, bad gateway.
+_PROVIDER_DOWN_RE = re.compile(
+    r"rate.?limit|quota|overload|503|502|service.unavailable|too.many.requests",
+    re.I,
+)
+
 from pydantic import BaseModel, Field
 
 try:
@@ -767,6 +774,24 @@ class Orchestrator:
                             n,
                             agent_err,
                         )
+                        # Fix 4: If the provider is down / rate-limited,
+                        # skip the fallback entirely.  Running _edit_zone_latex
+                        # would waste up to 3 more LLM calls (×7 zones = 21
+                        # wasted calls) with 100% probability of failure.
+                        if _PROVIDER_DOWN_RE.search(str(agent_err)):
+                            log.warning(
+                                "orch.warning: provider-down detected, "
+                                "skipping fallback for zone=%s",
+                                n,
+                            )
+                            return (
+                                n,
+                                None,
+                                None,
+                                None,
+                                None,
+                                f"Provider unavailable: {agent_err}",
+                            )
                         try:
                             c, s, p, m = _edit_zone_latex(
                                 zone_no=n,
