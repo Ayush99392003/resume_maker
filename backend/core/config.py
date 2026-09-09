@@ -58,3 +58,5 @@ PDF_CACHE_DIR = os.getenv("PDF_CACHE_DIR", "").strip()
 # Redis Configuration (for rate limiting, pub/sub, queues)
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0").strip()
 
+# Per-user chat rate limiting (sliding 60-second window, in-process)
+MAX_CHAT_PER_MINUTE = int(os.getenv("MAX_CHAT_PER_MINUTE", "10"))

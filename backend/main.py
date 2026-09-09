@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 
@@ -49,6 +49,9 @@ try:
     )
     from core.latex_soften import soften_latex_for_tectonic
     from core import config
+    from core.rate_limiter import chat_rate_limiter
+    from core.orchestrator import orchestrator as _orchestrator
+    from core.zone_agents import zone_agent_router as _zone_agent_router
     from llm_router import llm_router, SUPPORTED_PROVIDERS
 except ImportError:
     from .core.compiler import compiler, CompilationError
@@ -86,6 +89,9 @@ except ImportError:
     )
     from .core.latex_soften import soften_latex_for_tectonic
     from .core import config
+    from .core.rate_limiter import chat_rate_limiter
+    from .core.orchestrator import orchestrator as _orchestrator
+    from .core.zone_agents import zone_agent_router as _zone_agent_router
     from .llm_router import llm_router, SUPPORTED_PROVIDERS
 
 setup_logging()
@@ -1629,6 +1635,7 @@ async def put_session_latex(
 @app.post("/chat")
 async def chat(
     req: ChatRequest,
+    request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
     session = session_store.get(req.session_id)
@@ -1640,6 +1647,22 @@ async def chat(
     )
     _check_session_access(session, user)
 
+    # Per-user rate limiting — keyed by username for auth'd users, IP otherwise
+    _rate_key = (
+        user.username
+        if user
+        else (request.client.host if request.client else "anonymous")
+    )
+    if not chat_rate_limiter.check_and_record(_rate_key):
+        remaining_wait = 60
+        log.warning("chat: rate limit hit key=%s", _rate_key)
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Rate limit exceeded ({remaining_wait}s window). "
+                "Please wait before sending another message."
+            ),
+        )
 
     if req.template_name:
         session.template_name = req.template_name
