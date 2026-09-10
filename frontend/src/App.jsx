@@ -106,6 +106,7 @@ export default function App() {
   const [compileNote, setCompileNote] = useState('');
   const [compatNote, setCompatNote] = useState('');
   const [autoSyncing, setAutoSyncing] = useState(false);
+  const [streamProgress, setStreamProgress] = useState(''); // SSE zone progress
   const chatEndRef = useRef(null);
   const pdfUrlRef = useRef('');
   const autoSyncSkipRef = useRef(false);
@@ -675,47 +676,123 @@ export default function App() {
     const sid = sessionId;
     const text = inputValue;
     const targetZoneToSend = selectedTargetZone;
-    setSelectedTargetZone('auto'); // Reset for next interaction
+    setSelectedTargetZone('auto');
     setInputValue('');
     setMessages(prev => [...prev, { role: 'user', content: text }]);
     setLoading(true);
-    try {
-      const resp = await axios.post(`${API_BASE}/chat`, {
-        session_id: sid,
-        message: text,
-        target_zone: targetZoneToSend,
-        template_name: selectedTemplate,
-        ...llmPayload(),
-      });
-      setLatexCode(resp.data.latex_code || '');
-      if (resp.data.session) applyZoneState(resp.data.session, resp.data.latex_code);
-      else if (resp.data.catalog) applyZoneState(resp.data.catalog, resp.data.latex_code);
-      if (resp.data.pdf_base64) updatePdf(resp.data.pdf_base64);
-      setProvider(resp.data.provider || provider);
-      setModel(resp.data.model || model);
-      if (resp.data.undo_depth != null) setUndoDepth(resp.data.undo_depth);
+    setStreamProgress('');
+
+    // Helper to apply the full /chat response payload
+    const applyResult = (data) => {
+      setLatexCode(data.latex_code || '');
+      if (data.session) applyZoneState(data.session, data.latex_code);
+      else if (data.catalog) applyZoneState(data.catalog, data.latex_code);
+      if (data.pdf_base64) updatePdf(data.pdf_base64);
+      setProvider(data.provider || provider);
+      setModel(data.model || model);
+      if (data.undo_depth != null) setUndoDepth(data.undo_depth);
       const msg = {
         role: 'assistant',
-        content: resp.data.reply,
-        provider: resp.data.provider,
-        model: resp.data.model,
+        content: data.reply,
+        provider: data.provider,
+        model: data.model,
         meta: {
-          zones_changed: resp.data.zones_changed,
-          resolved_zones: resp.data.resolved_zones,
+          zones_changed: data.zones_changed,
+          resolved_zones: data.resolved_zones,
         },
       };
-      if (resp.data.proposals) {
+      if (data.proposals) {
         msg.type = 'proposal';
-        msg.sessionId = resp.data.proposals.session_id;
-        msg.variants = resp.data.proposals.variants;
+        msg.sessionId = data.proposals.session_id;
+        msg.variants = data.proposals.variants;
       }
       setMessages(prev => [...prev, msg]);
+    };
+
+    // Build SSE query string (EventSource only supports GET + query params)
+    const params = new URLSearchParams({
+      message: text,
+      target_zone: targetZoneToSend,
+      provider,
+      model,
+      ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
+    });
+    const streamUrl = `${API_BASE}/sessions/${sid}/chat/stream?${params.toString()}`;
+
+    let usedSSE = false;
+    try {
+      await new Promise((resolve, reject) => {
+        const es = new EventSource(streamUrl);
+        usedSSE = true;
+
+        es.addEventListener('progress', (e) => {
+          try {
+            const d = JSON.parse(e.data);
+            setStreamProgress(
+              `Filling zone ${d.done_count}/${d.total_count}: ${d.description || `Zone ${d.zone_no}`}…`
+            );
+          } catch (_) {}
+        });
+
+        es.addEventListener('result', (e) => {
+          es.close();
+          try {
+            applyResult(JSON.parse(e.data));
+          } catch (parseErr) {
+            reject(parseErr);
+            return;
+          }
+          resolve();
+        });
+
+        es.addEventListener('error', (e) => {
+          es.close();
+          // If we never got any event (connection refused / 4xx),
+          // fall through to POST /chat fallback
+          if (!usedSSE) {
+            reject(new Error('SSE connection failed'));
+          } else {
+            let detail = 'Stream error';
+            try { detail = JSON.parse(e.data)?.detail || detail; } catch (_) {}
+            reject(new Error(detail));
+          }
+        });
+
+        // Abort after 5 minutes as a safety belt
+        const timeout = setTimeout(() => {
+          es.close();
+          reject(new Error('Stream timed out'));
+        }, 300_000);
+        // Clear timeout when resolved/rejected
+        const orig = { resolve, reject };
+        resolve = (v) => { clearTimeout(timeout); orig.resolve(v); };
+        reject  = (v) => { clearTimeout(timeout); orig.reject(v); };
+      });
       await loadSessions();
     } catch (e) {
-      console.error('chat error', e.response?.status, e.response?.data);
-      pushAssistant(errDetail(e, 'Chat failed'), { status: 'error' });
+      // SSE failed or unavailable — fall back to POST /chat
+      if (!usedSSE || e.message === 'SSE connection failed') {
+        try {
+          const resp = await axios.post(`${API_BASE}/chat`, {
+            session_id: sid,
+            message: text,
+            target_zone: targetZoneToSend,
+            template_name: selectedTemplate,
+            ...llmPayload(),
+          });
+          applyResult(resp.data);
+          await loadSessions();
+        } catch (fallbackErr) {
+          console.error('chat fallback error', fallbackErr.response?.status, fallbackErr.response?.data);
+          pushAssistant(errDetail(fallbackErr, 'Chat failed'), { status: 'error' });
+        }
+      } else {
+        console.error('chat stream error', e);
+        pushAssistant(errDetail(e, 'Chat failed'), { status: 'error' });
+      }
     } finally {
       setLoading(false);
+      setStreamProgress('');
     }
   };
 
@@ -1425,7 +1502,8 @@ export default function App() {
             })}
             {loading && (
               <div className="text-xs text-ink-500 flex items-center gap-2 px-1">
-                <RefreshCw size={12} className="animate-spin text-accent" /> Working…
+                <RefreshCw size={12} className="animate-spin text-accent" />
+                {streamProgress || 'Working\u2026'}
               </div>
             )}
             <div ref={chatEndRef} />
