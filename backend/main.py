@@ -50,6 +50,7 @@ try:
     from core.latex_soften import soften_latex_for_tectonic
     from core import config
     from core.rate_limiter import chat_rate_limiter
+    from core.chat_stream import stream_chat_turn
     from core.orchestrator import orchestrator as _orchestrator
     from core.zone_agents import zone_agent_router as _zone_agent_router
     from llm_router import llm_router, SUPPORTED_PROVIDERS
@@ -90,6 +91,7 @@ except ImportError:
     from .core.latex_soften import soften_latex_for_tectonic
     from .core import config
     from .core.rate_limiter import chat_rate_limiter
+    from .core.chat_stream import stream_chat_turn
     from .core.orchestrator import orchestrator as _orchestrator
     from .core.zone_agents import zone_agent_router as _zone_agent_router
     from .llm_router import llm_router, SUPPORTED_PROVIDERS
@@ -1890,6 +1892,208 @@ async def chat(
             for z in (session.zones or [])
         ],
     }
+
+
+# ---------- SSE streaming chat ----------
+
+
+@app.get("/sessions/{session_id}/chat/stream")
+async def chat_stream(
+    session_id: str,
+    message: str,
+    request: Request,
+    target_zone: str = "auto",
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    template_name: Optional[str] = None,
+    authorization: Optional[str] = None,  # passed as query param for EventSource
+):
+    """SSE endpoint for streaming per-zone progress during a chat turn.
+
+    Emits the following event types:
+    - ``progress``  — ``{zone_no, description, done_count, total_count}``
+    - ``result``    — full JSON payload identical to POST /chat
+    - ``error``     — ``{detail}``
+
+    The frontend should prefer this over POST /chat for full-rewrite turns
+    and fall back to POST /chat if the EventSource fails to connect.
+    """
+    session = session_store.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    user = _get_current_user(
+        authorization, required=config.REQUIRE_AUTH_FOR_SESSIONS
+    )
+    _check_session_access(session, user)
+
+    # Rate limiting — same key as POST /chat
+    _rate_key = (
+        user.username
+        if user
+        else (request.client.host if request.client else "anonymous")
+    )
+    if not chat_rate_limiter.check_and_record(_rate_key):
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded (60s window). Please wait.",
+        )
+
+    if template_name:
+        session.template_name = template_name
+
+    _provider, _model = _resolve_llm(provider, model, session)
+    api_key = _resolve_api_key(
+        provider=_provider,
+        request_key=None,
+        authorization=authorization,
+    )
+
+    log.info(
+        "chat_stream: session=%s provider=%s model=%s msg_chars=%s",
+        session_id,
+        _provider,
+        _model,
+        len(message or ""),
+    )
+
+    try:
+        llm_router.get_provider(_provider, api_key=api_key)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Build zone document (migrate old sessions on the fly)
+    doc = document_from_session(session)
+    if doc is None or not doc.zones:
+        try:
+            template = template_manager.get_template(session.template_name) or ""
+            doc = latex_to_zones(session.latex_code or template,
+                                 source_url=session.source_url)
+            sync_session_from_document(session, doc)
+            session_store.save(session)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500, detail=f"Zone migrate failed: {e}"
+            )
+
+    user_turns = sum(1 for m in session.messages if m.role == "user")
+    placeholders = any(
+        "[[" in (z.get("latex") or "") for z in (session.zones or [])
+    )
+    is_first_fill = user_turns == 0 or placeholders
+
+    # Record user message + undo snapshot before streaming
+    session_store.append_message(session, role="user", content=message)
+    session = session_store.get(session_id)
+    user_msg_id = session.messages[-1].id if session.messages else None
+    undo_snap = push_turn_snapshot(session, session_store)
+
+    # Captures current session/message state into closure for finalize_fn
+    _session_id_ref = session_id
+
+    async def _finalize(orch_result) -> Dict[str, Any]:
+        """Compile, save session, build response — mirrors POST /chat logic."""
+        sess = session_store.get(_session_id_ref)
+        pdf_b64 = None
+        final_latex = (
+            orch_result.document.assemble()
+            if hasattr(orch_result, "document")
+            else (sess.latex_code or "")
+        )
+
+        if hasattr(orch_result, "document") and orch_result.document:
+            sync_session_from_document(sess, orch_result.document)
+            final_latex = sess.latex_code
+
+        if orch_result.zones_changed or is_first_fill:
+            try:
+                pdf_bytes, final_latex = await compile_with_retry(
+                    final_latex,
+                    provider=_provider,
+                    model=_model,
+                    api_key=api_key,
+                    project_dir=getattr(sess, "project_dir", None),
+                )
+                pdf_b64 = _pdf_b64(pdf_bytes)
+                sess.latex_code = final_latex
+            except Exception as compile_err:
+                log.exception("chat_stream: compile failed - %s", compile_err)
+                rolled = rollback_to_snapshot(sess, session_store)
+                if rolled:
+                    final_latex = sess.latex_code
+
+        sess.active_provider = orch_result.provider
+        sess.active_model = orch_result.model
+        session_store.save(sess)
+
+        session_store.append_message(
+            sess,
+            role="assistant",
+            content=orch_result.reply,
+            provider=orch_result.provider,
+            model=orch_result.model,
+            meta={
+                "zones_changed": orch_result.zones_changed,
+                "resolved_zones": orch_result.resolved_zones,
+                "tool_trace": orch_result.tool_trace,
+                "route": "orchestrator",
+            },
+        )
+        sess = session_store.get(_session_id_ref)
+        asst_msg_id = sess.messages[-1].id if sess.messages else None
+        snap_msg_ids = [i for i in [user_msg_id, asst_msg_id] if i]
+        if snap_msg_ids:
+            tag_turn_snapshot(sess, undo_snap, snap_msg_ids, session_store)
+            sess = session_store.get(_session_id_ref)
+
+        return {
+            "session": sess.model_dump(),
+            "reply": orch_result.reply,
+            "latex_code": sess.latex_code,
+            "pdf_base64": pdf_b64,
+            "zones_changed": orch_result.zones_changed,
+            "resolved_zones": orch_result.resolved_zones,
+            "provider": orch_result.provider,
+            "model": orch_result.model,
+            "tool_trace": orch_result.tool_trace,
+            "route": "orchestrator",
+            "undo_depth": len(sess.turn_history),
+            "catalog": [
+                {
+                    "zone_no": z.get("zone_no"),
+                    "description": z.get("description"),
+                    "kind": z.get("kind"),
+                }
+                for z in (sess.zones or [])
+            ],
+        }
+
+    async def _event_generator():
+        # Send a keep-alive comment immediately so the browser knows the
+        # connection is alive (important for cold-start Cloud Run instances)
+        yield ": keep-alive\n\n"
+        async for chunk in stream_chat_turn(
+            orchestrator=_orchestrator,
+            zone_agent_router=_zone_agent_router,
+            document=doc,
+            user_message=message,
+            is_first_fill=is_first_fill,
+            target_zone=target_zone,
+            provider=_provider,
+            model=_model,
+            api_key=api_key,
+            finalize_fn=_finalize,
+        ):
+            yield chunk
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # disable nginx buffering
+        },
+    )
 
 
 # ---------- Session undo ----------
