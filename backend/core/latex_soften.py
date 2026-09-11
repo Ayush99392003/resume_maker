@@ -94,6 +94,46 @@ def soften_latex_for_tectonic(latex: str) -> Tuple[str, List[str]]:
 
     disabled: List[str] = []
 
+    # ------------------------------------------------------------------ #
+    # pdfTeX-only primitives — Tectonic uses XeTeX so these always crash. #
+    # Strip them up-front so the AI fixer never wastes retry budget here. #
+    # ------------------------------------------------------------------ #
+
+    # \input{glyphtounicode} — pdfTeX glyph-mapping, not available in XeTeX
+    src2, n_glyph = re.subn(
+        r"^[ \t]*\\input\{glyphtounicode\}[ \t]*$",
+        "% glyphtounicode disabled (pdfTeX-only, not available in Tectonic/XeTeX)",
+        src,
+        flags=re.MULTILINE,
+    )
+    if n_glyph:
+        src = src2
+        changes.append("disabled \\input{glyphtounicode} (pdfTeX-only)")
+
+    # \pdfgentounicode=1 — pdfTeX primitive
+    src2, n_pdfgen = re.subn(
+        r"^[ \t]*\\pdfgentounicode\s*=\s*\d+[ \t]*$",
+        "% pdfgentounicode disabled (pdfTeX-only, not available in Tectonic/XeTeX)",
+        src,
+        flags=re.MULTILINE,
+    )
+    if n_pdfgen:
+        src = src2
+        changes.append("disabled \\pdfgentounicode (pdfTeX-only)")
+
+    # \input{particulars} or \input{particulars.tex} — orphaned Overleaf
+    # side-file reference.  Match both forms (with and without .tex extension).
+    # Comment the line out so compile can proceed without the file.
+    src2, n_part = re.subn(
+        r"^([ \t]*)\\input\{particulars(?:\.tex)?\}([ \t]*)$",
+        r"\1% \\input{particulars} disabled (side-file not present)\2",
+        src,
+        flags=re.MULTILINE,
+    )
+    if n_part:
+        src = src2
+        changes.append("disabled \\input{particulars} (side-file not present)")
+
     def _disable_pkg(m: re.Match) -> str:
         pkg = m.group(2)
         if pkg not in disabled:
@@ -105,6 +145,45 @@ def soften_latex_for_tectonic(latex: str) -> Tuple[str, List[str]]:
         src = new_src
         for pkg in disabled:
             changes.append(f"disabled {pkg}")
+
+    # ------------------------------------------------------------------ #
+    # xcolor: upgrade to dvipsnames+svgnames so named colors like         #
+    # NAVYBLUE, Maroon, DarkSlateBlue etc. resolve without errors.        #
+    # Only touch \usepackage{xcolor} lines that have NO option list yet.  #
+    # ------------------------------------------------------------------ #
+    _XCOLOR_BARE = re.compile(
+        r"^([ \t]*)\\usepackage(\s*)\{xcolor\}([ \t]*)$",
+        re.MULTILINE,
+    )
+    _XCOLOR_OPTS = re.compile(
+        r"\\usepackage\s*\[[^\]]*\]\s*\{xcolor\}",
+    )
+    if _XCOLOR_BARE.search(src) and not _XCOLOR_OPTS.search(src):
+        src2, n_xc = _XCOLOR_BARE.subn(
+            r"\1\\usepackage[dvipsnames,svgnames,x11names]\2{xcolor}\3",
+            src,
+        )
+        if n_xc:
+            src = src2
+            changes.append(
+                "upgraded \\usepackage{xcolor} -> [dvipsnames,svgnames,x11names]"
+            )
+    elif _XCOLOR_OPTS.search(src):
+        # Already has options — ensure dvipsnames is present
+        def _add_dvipsnames(m: re.Match) -> str:
+            opts = m.group(0)
+            if "dvipsnames" not in opts:
+                opts = opts.replace(
+                    "\\usepackage[",
+                    "\\usepackage[dvipsnames,svgnames,",
+                    1,
+                )
+                return opts
+            return m.group(0)
+        src2 = _XCOLOR_OPTS.sub(_add_dvipsnames, src)
+        if src2 != src:
+            src = src2
+            changes.append("added dvipsnames to \\usepackage[...]{xcolor}")
 
     # Contour-based \myuline (Harshibar etc.) — brace-balanced rewrite
     if r"\myuline" in src and (
