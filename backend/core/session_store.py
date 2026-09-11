@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Path to the bundled resume.cls that every session workspace receives
+_RESUME_CLS_SRC: Path = (
+    Path(__file__).resolve().parent.parent / "templates" / "resume.cls"
+)
 
 from pydantic import BaseModel, Field
 
@@ -84,7 +90,7 @@ class ChatSession(BaseModel):
     session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     username: Optional[str] = None
     title: str = "New resume chat"
-    template_name: str = "modern"
+    template_name: str = "starter"
     latex_code: str = ""
     # Numbered zone document (orchestrator source of truth)
     header: str = ""
@@ -94,6 +100,8 @@ class ChatSession(BaseModel):
     next_zone_no: int = 1
     source_url: Optional[str] = None
     project_dir: Optional[str] = None
+    # Persistent per-session workspace — contains resume.cls and compiled assets
+    workspace_dir: Optional[str] = None
     setup_complete: bool = False
     # Rollback snapshot — written before every orchestrator turn (single slot,
     # used for automatic rollback on compile failure)
@@ -126,15 +134,41 @@ class SessionStore:
             )
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        self._workspace_root = (
+            Path(__file__).resolve().parent.parent / "data" / "workspaces"
+        )
+        self._workspace_root.mkdir(parents=True, exist_ok=True)
 
     def _path(self, session_id: str) -> Path:
         return self.base_dir / f"{session_id}.json"
+
+    def workspace_path(self, session_id: str) -> Path:
+        """Return the dedicated workspace directory for *session_id*."""
+        return self._workspace_root / session_id
+
+    def _seed_workspace(self, session_id: str) -> Path:
+        """Create workspace dir and seed resume.cls into it.
+
+        Returns the workspace ``Path``.
+        """
+        ws = self.workspace_path(session_id)
+        ws.mkdir(parents=True, exist_ok=True)
+        dest_cls = ws / "resume.cls"
+        if not dest_cls.exists() and _RESUME_CLS_SRC.exists():
+            shutil.copy2(_RESUME_CLS_SRC, dest_cls)
+        return ws
+
+    def _cleanup_workspace(self, session_id: str) -> None:
+        """Remove the workspace directory for *session_id* if it exists."""
+        ws = self.workspace_path(session_id)
+        if ws.exists():
+            shutil.rmtree(ws, ignore_errors=True)
 
     def create(
         self,
         *,
         username: Optional[str] = None,
-        template_name: str = "modern",
+        template_name: str = "starter",
         title: str = "New resume chat",
         latex_code: str = "",
         provider: str = "groq",
@@ -165,6 +199,21 @@ class SessionStore:
             project_dir=project_dir,
             setup_complete=setup_complete,
         )
+        # Seed a persistent workspace with resume.cls for this session
+        ws = self._seed_workspace(session.session_id)
+        # If the caller supplied a separate project_dir (Overleaf import),
+        # copy its files into the session workspace so everything lives together.
+        if project_dir and Path(project_dir).is_dir() and str(ws) != project_dir:
+            for item in Path(project_dir).iterdir():
+                dest = ws / item.name
+                if not dest.exists():
+                    if item.is_dir():
+                        shutil.copytree(item, dest)
+                    else:
+                        shutil.copy2(item, dest)
+        session.workspace_dir = str(ws)
+        # Always use workspace as project_dir so Tectonic resolves local files
+        session.project_dir = str(ws)
         if welcome:
             session.messages.append(
                 ChatMessageRecord(role="assistant", content=welcome)
@@ -196,6 +245,7 @@ class SessionStore:
         path = self._path(session_id)
         if path.exists():
             path.unlink()
+            self._cleanup_workspace(session_id)
             return True
         return False
 
