@@ -242,13 +242,13 @@ class CompileRequest(BaseModel):
 
 
 class CreateSessionRequest(BaseModel):
-    template_name: str = "modern"
+    template_name: str = "starter"
     title: Optional[str] = None
     provider: Optional[str] = None
     model: Optional[str] = None
     source_url: Optional[str] = None
     latex: Optional[str] = None
-    # Optional zone filter (zone-selection path)
+    # Optional zone filter (zone-selection path, kept for back-compat)
     included_zone_nos: Optional[List[int]] = None
     zone_order: Optional[List[int]] = None
     custom_zones: Optional[List[str]] = None
@@ -1180,7 +1180,7 @@ async def setup_import(req: SetupImportRequest):
         url=req.url,
         latex=req.latex,
         template_name=req.template_name or (
-            "modern" if not req.url and not req.latex else None
+            "starter" if not req.url and not req.latex else None
         ),
     )
     # Soft compile check so UI knows if format can render
@@ -1262,13 +1262,18 @@ async def create_session(
             url=req.source_url, latex=req.latex
         )
     else:
-        template = template_manager.get_template(req.template_name)
+        # No URL/paste — use the starter template (resume.cls-based)
+        tpl_name = req.template_name or "starter"
+        template = template_manager.get_template(tpl_name)
         if not template:
-            log.error("session.create: template not found %s", req.template_name)
+            # Graceful fallback: try starter, then hard error
+            template = template_manager.get_template("starter")
+        if not template:
+            log.error("session.create: template not found %s", tpl_name)
             raise HTTPException(status_code=404, detail="Template not found")
         soft, compat_notes = soften_latex_for_tectonic(template)
         doc = latex_to_zones(soft)
-        log.info("session.create: bundled template zones=%s", doc.zone_order)
+        log.info("session.create: bundled template=%s zones=%s", tpl_name, doc.zone_order)
 
     if req.source_url and not doc.source_url:
         doc.source_url = req.source_url
@@ -1306,18 +1311,21 @@ async def create_session(
             pass
     session = session_store.create(
         username=username,
-        template_name=req.template_name,
+        template_name=req.template_name or "starter",
         title=req.title or "New resume chat",
         latex_code=assembled,
         provider=provider,
         model=model,
-
         header=doc.header,
         footer=doc.footer,
         zones=[z.model_dump() for z in doc.zones],
         zone_order=list(doc.zone_order),
         next_zone_no=doc.next_zone_no,
         source_url=doc.source_url,
+        # project_dir is intentionally omitted here — session_store.create()
+        # will create a fresh workspace, seed resume.cls, and set project_dir
+        # to that workspace automatically. If an Overleaf import provided a
+        # separate project_dir, its files are copied into the workspace too.
         project_dir=project_dir,
         setup_complete=True,
         welcome=(
