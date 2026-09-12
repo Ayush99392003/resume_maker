@@ -1,0 +1,80 @@
+% ATS-Ready Resume — powered by resume.cls
+% This is the default starter template for Resume Maker.
+% Each section between ZONE:START / ZONE:END markers is managed independently by the AI.
+
+\documentclass{resume}
+
+\usepackage[left=0.6in,top=0.5in,right=0.6in,bottom=0.5in]{geometry}
+\usepackage{hyperref}
+\usepackage{enumitem}
+
+\hypersetup{colorlinks=false,hidelinks}
+
+%-----------------------------------------------------------------------
+% ZONE:HEADER:START
+\name{Your Name}
+\address{City, State \\ \href{mailto:you@email.com}{you@email.com} \\ (555) 555-5555}
+\address{\href{https://linkedin.com/in/yourprofile}{linkedin.com/in/yourprofile} \\ \href{https://github.com/yourgithub}{github.com/yourgithub}}
+% ZONE:HEADER:END
+%-----------------------------------------------------------------------
+
+\begin{document}
+
+%-----------------------------------------------------------------------
+% ZONE:SUMMARY:START
+\begin{rSection}{Summary}
+Results-driven professional with experience in software engineering, AI/ML, and cloud infrastructure.
+\end{rSection}
+% ZONE:SUMMARY:END
+%-----------------------------------------------------------------------
+
+%-----------------------------------------------------------------------
+% ZONE:EXPERIENCE:START
+\begin{rSection}{Experience}
+
+\begin{rSubsection}{Company Name}{Month Year -- Present}{Job Title}{City, State}
+\item Led development of key product features, improving user engagement by 30\%.
+\item Collaborated cross-functionally with product, design, and data science teams.
+\end{rSubsection}
+
+\end{rSection}
+% ZONE:EXPERIENCE:END
+%-----------------------------------------------------------------------
+
+%-----------------------------------------------------------------------
+% ZONE:EDUCATION:START
+\begin{rSection}{Education}
+
+\begin{rSubsection}{University Name}{Month Year -- Month Year}{Degree, Major; GPA: X.XX/4.00}{}
+\item Relevant Coursework: Data Structures, Algorithms, Software Engineering.
+\end{rSubsection}
+
+\end{rSection}
+% ZONE:EDUCATION:END
+%-----------------------------------------------------------------------
+
+%-----------------------------------------------------------------------
+% ZONE:SKILLS:START
+\begin{rSection}{Skills}
+\begin{tabular}{@{} >{\bfseries}l @{\hspace{6ex}} l}
+Languages    & Python, TypeScript, Java \\
+Frameworks   & FastAPI, React, Node.js \\
+Cloud        & AWS, GCP, Azure \\
+\end{tabular}
+\end{rSection}
+% ZONE:SKILLS:END
+%-----------------------------------------------------------------------
+
+%-----------------------------------------------------------------------
+% ZONE:PROJECTS:START
+\begin{rSection}{Projects}
+
+\begin{rSubsection}{Project Name}{}{\href{https://github.com/yourgithub/project}{github.com/yourgithub/project}}{}
+\item Built a full-stack application using FastAPI and React, deployed on Google Cloud Run.
+\end{rSubsection}
+
+\end{rSection}
+% ZONE:PROJECTS:END
+%-----------------------------------------------------------------------
+
+\end{document}
