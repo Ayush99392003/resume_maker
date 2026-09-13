@@ -12,10 +12,12 @@ from pathlib import Path
 
 try:
     from core import config
+    from core.latex_compatibility import MAX_REPAIR_ATTEMPTS, RepairEngine
     from core.latex_soften import soften_latex_for_tectonic
     from core.logging_setup import get_logger
 except ImportError:
     from . import config
+    from .latex_compatibility import MAX_REPAIR_ATTEMPTS, RepairEngine
     from .latex_soften import soften_latex_for_tectonic
     from .logging_setup import get_logger
 
@@ -202,12 +204,33 @@ class TectonicCompiler:
                 "See https://tectonic-typesetting.github.io/book/latest/installation/",
             )
 
+    def _seed_cls_files(self, compile_dir: Path) -> None:
+        """Copy any .cls files from backend/templates/ into *compile_dir*.
+
+        This ensures custom document classes like ``resume.cls`` are always
+        available to Tectonic regardless of whether a session workspace is
+        used or a temp directory.  Files already present are not overwritten.
+        """
+        templates_dir = _backend_root() / "templates"
+        if not templates_dir.is_dir():
+            return
+        for cls_file in templates_dir.glob("*.cls"):
+            dest = compile_dir / cls_file.name
+            if not dest.exists():
+                try:
+                    shutil.copy2(cls_file, dest)
+                    log.debug("seeded %s into %s", cls_file.name, compile_dir)
+                except OSError as e:
+                    log.warning("could not seed %s: %s", cls_file.name, e)
+
     def compile(self, latex_code: str, *, project_dir: str | None = None) -> bytes:
         """
         Compile LaTeX string into PDF bytes.
 
-        If project_dir is set (Overleaf import with assets), write resume.tex
-        into that directory and compile there so .cls/.sty/images resolve.
+        If project_dir is set (session workspace or Overleaf import), write
+        resume.tex into that directory and compile there so .cls/.sty/images
+        resolve.  .cls files from backend/templates/ are always seeded into
+        the compile directory so custom document classes work everywhere.
         """
         code, _ = soften_latex_for_tectonic(latex_code or "")
         use_cache = (
@@ -236,6 +259,38 @@ class TectonicCompiler:
             len(code),
             bool(project_dir),
         )
+
+        def _compile_in_dir(target_dir: Path, init_code: str) -> tuple[bytes, str]:
+            self._seed_cls_files(target_dir)
+            engine = RepairEngine(self)
+            curr = init_code
+            tf = target_dir / "resume.tex"
+
+            for att in range(MAX_REPAIR_ATTEMPTS):
+                tf.write_text(curr, encoding="utf-8")
+                try:
+                    self._run_tectonic(tf, target_dir, target_dir)
+                    pf = target_dir / "resume.pdf"
+                    if not pf.exists():
+                        raise CompilationError(
+                            "No PDF.", logs="No PDF found in compile dir."
+                        )
+                    return pf.read_bytes(), curr
+                except CompilationError as err:
+                    new_c, act = engine.repair_source_and_workspace(
+                        curr, err.logs or "", compile_dir=target_dir
+                    )
+                    if not act or att == MAX_REPAIR_ATTEMPTS - 1:
+                        raise err
+                    log.info(
+                        "compile.auto_repair: attempt %s applied %s",
+                        att + 1,
+                        act,
+                    )
+                    curr = new_c
+
+            raise CompilationError("Max repairs exceeded", logs="")
+
         if project_dir:
             root = Path(project_dir)
             if not root.is_dir():
@@ -244,25 +299,13 @@ class TectonicCompiler:
                     "Project dir missing",
                     logs=f"No project directory: {project_dir}",
                 )
-            tex_file = root / "resume.tex"
-            tex_file.write_text(code, encoding="utf-8")
-            self._run_tectonic(tex_file, root, root)
-            pdf_file = root / "resume.pdf"
-            if not pdf_file.exists():
-                log.error("compile.error: no PDF in project dir %s", root)
-                raise CompilationError("No PDF.", logs="No PDF found in project dir.")
-            log.info("compile.step: ok project pdf_bytes=%s", pdf_file.stat().st_size)
-            return pdf_file.read_bytes()
+            pdf_bytes, _ = _compile_in_dir(root, code)
+            log.info("compile.step: ok project pdf_bytes=%s", len(pdf_bytes))
+            return pdf_bytes
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-            tex_file = tmp_path / "resume.tex"
-            tex_file.write_text(code, encoding="utf-8")
-            self._run_tectonic(tex_file, tmp_path, tmp_path)
-            pdf_file = tmp_path / "resume.pdf"
-            if not pdf_file.exists():
-                raise CompilationError("No PDF.", logs="No PDF found.")
-            pdf_bytes = pdf_file.read_bytes()
+            pdf_bytes, final_code = _compile_in_dir(tmp_path, code)
             if use_cache and cache_file:
                 try:
                     tmp_cache = cache_file.with_suffix(".tmp")
