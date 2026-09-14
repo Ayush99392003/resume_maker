@@ -16,19 +16,32 @@ from core.zones import zone_engine  # noqa: E402
 
 
 def _load_groq_api_key() -> str:
-    """Load real Groq API key from ayush.json profile."""
-    profile_path = BACKEND / "data" / "profiles" / "ayush.json"
-    if not profile_path.exists():
-        pytest.skip("ayush.json profile not found, skipping real LLM test")
+    """Load real Groq API key from environment or auth store."""
+    key = os.environ.get("GROQ_API_KEY", "").strip()
+    if key:
+        return key
 
     try:
-        data = json.loads(profile_path.read_text(encoding="utf-8"))
-        key = data.get("api_keys", {}).get("groq", "")
-        if not key:
-            pytest.skip("Groq key not found in profile, skipping")
-        return key
-    except Exception as e:
-        pytest.skip(f"Failed to read key from profile: {e}")
+        from core.auth_store import auth_store
+
+        user = auth_store.get_user("ayush")
+        cfg = auth_store.get_provider_config(user, "groq")
+        if cfg and cfg.api_key:
+            return cfg.api_key
+    except Exception:
+        pass
+
+    profile_path = BACKEND / "data" / "profiles" / "ayush.json"
+    if profile_path.exists():
+        try:
+            data = json.loads(profile_path.read_text(encoding="utf-8"))
+            key = data.get("api_keys", {}).get("groq", "")
+            if key:
+                return key
+        except Exception:
+            pass
+
+    pytest.skip("Groq key not found in environment or profile, skipping")
 
 
 def _resolve_groq_model(api_key: str) -> str:
@@ -90,23 +103,9 @@ def test_real_llm_edit_and_compile():
     os.environ["GROQ_API_KEY"] = groq_key
     groq_model = _resolve_groq_model(groq_key)
 
-    # 2. Build full LaTeX resume from template
-    data = {
-        "NAME": "John Doe",
-        "EMAIL": "john@example.com",
-        "PHONE": "123-456-7890",
-        "LINKEDIN": "linkedin.com/in/johndoe",
-        "BIO": "Experienced general software engineer.",
-        "EXPERIENCE": (
-            "\\begin{itemize}\n"
-            "\\item Built generic code\n"
-            "\\end{itemize}"
-        ),
-        "EDUCATION": "BS CS",
-        "SKILLS": "C++, Java",
-    }
-    latex_code = template_manager.fill_template("modern", data)
-    assert latex_code, "Template filling failed"
+    # 2. Load full LaTeX resume from starter template
+    latex_code = template_manager.get_template("starter")
+    assert latex_code, "Template loading failed"
 
     # Verify that initial zones exist
     zones_before = zone_engine.extract_zones(latex_code)
@@ -170,22 +169,8 @@ def test_real_llm_skills_edit_and_compile():
     os.environ["GROQ_API_KEY"] = groq_key
     groq_model = _resolve_groq_model(groq_key)
 
-    # 2. Build full LaTeX resume
-    data = {
-        "NAME": "John Doe",
-        "EMAIL": "john@example.com",
-        "PHONE": "123-456-7890",
-        "LINKEDIN": "linkedin.com/in/johndoe",
-        "BIO": "Experienced general software engineer.",
-        "EXPERIENCE": (
-            "\\begin{itemize}\n"
-            "\\item Built generic code\n"
-            "\\end{itemize}"
-        ),
-        "EDUCATION": "BS CS",
-        "SKILLS": "C++, Java",
-    }
-    latex_code = template_manager.fill_template("modern", data)
+    # 2. Load full LaTeX resume
+    latex_code = template_manager.get_template("starter")
     assert latex_code
 
     zones_before = zone_engine.extract_zones(latex_code)
@@ -235,22 +220,8 @@ def test_real_llm_experience_edit_and_compile():
     os.environ["GROQ_API_KEY"] = groq_key
     groq_model = _resolve_groq_model(groq_key)
 
-    # 2. Build full LaTeX resume
-    data = {
-        "NAME": "John Doe",
-        "EMAIL": "john@example.com",
-        "PHONE": "123-456-7890",
-        "LINKEDIN": "linkedin.com/in/johndoe",
-        "BIO": "Experienced general software engineer.",
-        "EXPERIENCE": (
-            "\\begin{itemize}\n"
-            "\\item Built generic code\n"
-            "\\end{itemize}"
-        ),
-        "EDUCATION": "BS CS",
-        "SKILLS": "C++, Java",
-    }
-    latex_code = template_manager.fill_template("modern", data)
+    # 2. Load full LaTeX resume
+    latex_code = template_manager.get_template("starter")
     assert latex_code
 
     zones_before = zone_engine.extract_zones(latex_code)
