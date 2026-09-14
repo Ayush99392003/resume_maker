@@ -41,9 +41,32 @@ from rich.table import Table
 console = Console(highlight=False)
 
 
-def get_groq_key_and_model():
-    profile = BACKEND / "data" / "profiles" / "ayush.json"
-    key = json.loads(profile.read_text(encoding="utf-8"))["api_keys"]["groq"]
+def get_groq_key_and_model() -> tuple[str, str]:
+    """Resolve active Groq API key and working model."""
+    key = os.environ.get("GROQ_API_KEY")
+    if not key:
+        try:
+            from core.auth_store import auth_store
+
+            user = auth_store.get_user("ayush")
+            cfg = auth_store.get_provider_config(user, "groq")
+            if cfg and cfg.api_key:
+                key = cfg.api_key
+        except Exception:
+            pass
+
+    if not key:
+        profile = BACKEND / "data" / "profiles" / "ayush.json"
+        if profile.exists():
+            try:
+                data = json.loads(profile.read_text(encoding="utf-8"))
+                key = data.get("api_keys", {}).get("groq")
+            except Exception:
+                pass
+
+    if not key:
+        pytest.skip("No Groq API key found in profile or environment.")
+
     models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.6-27b"]
     for m in models:
         try:
