@@ -1,69 +1,72 @@
-"""Top-level chat router: direct_reply vs orchestrator."""
+"""Top-level context-aware chat router: direct_reply, structure, or content."""
 
 from __future__ import annotations
 
+import json
 import re
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
 try:
-    from llm_router import ChatMessage, llm_router
     from core.logging_setup import get_logger
+    from core.zone_agents import _pre_escape_backslashes
+    from llm_router import ChatMessage, llm_router
 except ImportError:
     from ..llm_router import ChatMessage, llm_router  # type: ignore
     from .logging_setup import get_logger
+    from .zone_agents import _pre_escape_backslashes
 
 log = get_logger("chat_router")
 
-RouteName = Literal["direct_reply", "orchestrator"]
+RouteName = Literal["direct_reply", "orchestrator", "structure", "content"]
 
 
 class RouteDecision(BaseModel):
     route: RouteName
     reason: str = ""
-    reply: Optional[str] = None
+    reply: str | None = None
 
 
-_GREETINGS = {
-    "hi",
-    "hello",
-    "hey",
-    "hi there",
-    "hello there",
-    "good morning",
-    "good afternoon",
-    "good evening",
-    "thanks",
-    "thank you",
-    "thx",
-    "ty",
-}
-
-_HELP_PAT = re.compile(
-    r"\b(how (does|do) (this|it) work|what can you do|help|commands?)\b",
-    re.I,
-)
-
-_RESUME_HINTS = re.compile(
-    r"\b(zone\s*\d+|header|contact|phone|email|location|portfolio|linkedin|github|address|"
-    r"experience|education|skills?|summary|projects?|certificat|language|award|publication|"
-    r"extracurricular|bio|resume|cv|reorder|swap|add zone|remove zone|delete zone|move|"
-    r"section|compile|latex|bullet|job|company|university|update|edit|change|add|set)\b",
-    re.I,
-)
+def _extract_json(text: str) -> dict:
+    """Extract and parse JSON object from LLM response string."""
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    text = _pre_escape_backslashes(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                return {}
+        return {}
 
 
-def _rule_route(
+def classify_route(
     message: str,
     *,
-    zones_empty: bool,
-    target_zone: Optional[str] = None,
-) -> Optional[RouteDecision]:
+    catalog: list[dict[str, Any]] | None = None,
+    history: list[dict[str, str]] | None = None,
+    target_zone: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    api_key: str | None = None,
+    use_llm: bool = True,
+) -> RouteDecision:
+    """Classify user request using context history without regex scraping."""
     text = (message or "").strip()
 
-    # Explicit user target zone chip selection -> instant orchestrator fast-path
-    if target_zone and target_zone.strip().lower() not in ("auto", "none", ""):
+    # Fast-path: Explicit UI zone chip selection bypasses classification
+    if target_zone and target_zone.strip().lower() not in (
+        "auto",
+        "none",
+        "",
+    ):
         return RouteDecision(
             route="orchestrator",
             reason=f"target_zone_{target_zone.strip()}",
@@ -73,72 +76,11 @@ def _rule_route(
         return RouteDecision(
             route="direct_reply",
             reason="empty",
-            reply="Send a greeting, paste your biodata, or ask to change a zone.",
+            reply="Send a greeting, ask a question, or paste biodata to edit.",
         )
-
-    lower = text.lower().strip().rstrip("!.")
-    if lower in _GREETINGS:
-        return RouteDecision(
-            route="direct_reply",
-            reason="greeting",
-            reply=(
-                "Hi — paste your biodata to fill the resume, or tell me which "
-                "zone to change (e.g. “make zone 2 shorter” / “add projects”)."
-            ),
-        )
-
-    if _HELP_PAT.search(text) and not _RESUME_HINTS.search(text):
-        return RouteDecision(
-            route="direct_reply",
-            reason="help",
-            reply=(
-                "I edit numbered resume zones. Paste biodata to fill them, "
-                "or ask to add/remove/reorder/edit a zone. Header and footer "
-                "of the LaTeX stay fixed."
-            ),
-        )
-
-    # Long paste / biodata → orchestrator
-    if len(text) >= 220 or text.count("\n") >= 4:
-        return RouteDecision(route="orchestrator", reason="long_biodata")
-
-    if _RESUME_HINTS.search(text):
-        return RouteDecision(route="orchestrator", reason="resume_keywords")
-
-    if zones_empty and len(text) >= 40:
-        return RouteDecision(route="orchestrator", reason="fill_sparse")
-
-    return None
-
-
-def classify_route(
-    message: str,
-    *,
-    catalog: Optional[List[Dict[str, Any]]] = None,
-    target_zone: Optional[str] = None,
-    provider: Optional[str] = None,
-    model: Optional[str] = None,
-    api_key: Optional[str] = None,
-    use_llm: bool = True,
-) -> RouteDecision:
-    """Decide direct_reply vs orchestrator."""
-    zones_empty = not catalog or all(
-        not (c.get("description") or "").strip() for c in (catalog or [])
-    )
-    ruled = _rule_route(
-        message, zones_empty=zones_empty, target_zone=target_zone
-    )
-    if ruled is not None:
-        log.info(
-            "route.step: rule → %s reason=%s msg_chars=%s",
-            ruled.route,
-            ruled.reason,
-            len(message or ""),
-        )
-        return ruled
 
     if not use_llm:
-        log.info("route.step: no-llm fallback → direct_reply")
+        log.info("route.step: no-llm fallback -> direct_reply")
         return RouteDecision(
             route="direct_reply",
             reason="fallback_direct",
@@ -148,72 +90,92 @@ def classify_route(
             ),
         )
 
-    system = (
-        "You classify chat messages for a LaTeX resume editor.\n"
-        "Return JSON: {\"route\": \"direct_reply\"|\"orchestrator\", "
-        "\"reason\": \"...\", \"reply\": \"optional short reply if direct\"}.\n"
-        "- direct_reply: greetings, thanks, meta/help, chitchat, no resume change\n"
-        "- orchestrator: biodata, zone edits, add/remove/reorder sections, "
-        "compile fixes, content changes\n"
-        "If direct_reply, include a brief helpful reply."
-    )
     catalog_txt = ""
     if catalog:
-        catalog_txt = "Zones: " + "; ".join(
-            f"{c.get('zone_no')}:{c.get('description')}" for c in catalog
+        catalog_txt = "Current Resume Sections:\n" + "\n".join(
+            f"- Zone {c.get('zone_no')}: {c.get('description')} "
+            f"({c.get('kind', 'section')})"
+            for c in catalog
         )
-    try:
-        import json
 
+    system = (
+        "You are the conversational assistant and intent classifier for a "
+        "LaTeX resume editor.\n"
+        "You have access to the conversation history and the active resume "
+        "sections.\n\n"
+        "CLASSIFICATION CATEGORIES:\n"
+        "1. 'direct_reply': For normal conversational messages (greetings, "
+        "thanks, questions about the resume, asking for advice, explanations, "
+        "asking what sections exist, general help, chitchat). When selecting "
+        "'direct_reply', you MUST provide a friendly, helpful, and "
+        "context-aware answer in the 'reply' field using the chat history.\n"
+        "2. 'structure': The user explicitly wants to change the layout "
+        "structure: adding a new section, deleting/removing an entire section, "
+        "or rearranging/reordering/swapping sections.\n"
+        "3. 'content': The user wants to edit, update, add, or delete text or "
+        "bullet points INSIDE an existing section, or paste biography/work "
+        "history to fill the sections.\n\n"
+        "Return JSON format:\n"
+        "{\n"
+        '  "route": "direct_reply" | "structure" | "content",\n'
+        '  "reason": "brief explanation",\n'
+        '  "reply": "contextual reply if direct_reply, otherwise null"\n'
+        "}"
+    )
+
+    messages: list[ChatMessage] = [
+        ChatMessage(role="system", content=f"{system}\n\n{catalog_txt}".strip())
+    ]
+
+    # Include recent chat history for context-awareness (up to 10 turns)
+    if history:
+        for turn in history[-10:]:
+            role = turn.get("role", "user")
+            content = turn.get("content", "")
+            if role in ("user", "assistant") and content:
+                messages.append(ChatMessage(role=role, content=content))
+
+    messages.append(ChatMessage(role="user", content=message))
+
+    try:
         resp = llm_router.chat(
-            [
-                ChatMessage(role="system", content=system),
-                ChatMessage(
-                    role="user",
-                    content=f"{catalog_txt}\n\nMessage:\n{message}",
-                ),
-            ],
+            messages,
             provider=provider,
             model=model,
             api_key=api_key,
-            temperature=0.0,
+            temperature=0.2,
             response_format="json",
         )
-        text = (resp.content or "").strip()
-        if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?\s*", "", text)
-            text = re.sub(r"\s*```$", "", text)
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError as e:
-            log.warning("route.step: json repair after decode error - %s", e)
-            m = re.search(r"\{.*\}", text, re.DOTALL)
-            data = json.loads(m.group(0)) if m else {}
-        if not isinstance(data, dict):
-            log.error("route.error: classify response not a dict")
-            raise ValueError("not a dict")
-        route = data.get("route", "direct_reply")
-        if route not in ("direct_reply", "orchestrator"):
+        data = _extract_json(resp.content)
+        route = (
+            str(data.get("route") or "direct_reply")
+            .replace(r"\_", "_")
+            .lower()
+            .strip()
+        )
+        if route not in ("direct_reply", "structure", "content"):
             route = "direct_reply"
+
         decision = RouteDecision(
-            route=route,
-            reason=str(data.get("reason") or "llm"),
+            route=route,  # type: ignore[arg-type]
+            reason=str(data.get("reason") or "llm_decision"),
             reply=data.get("reply"),
         )
         log.info(
-            "route.step: llm → %s reason=%s",
+            "route.step: llm -> %s reason=%s reply_chars=%s",
             decision.route,
             decision.reason,
+            len(decision.reply or ""),
         )
         return decision
-    except Exception as e:
-        log.exception("route.error: classify failed - %s", e)
+    except Exception:
+        log.exception("route.error: classify failed")
         return RouteDecision(
             route="direct_reply",
             reason="classify_error",
             reply=(
-                "I can fill or edit resume zones. Paste biodata or say what "
-                "to change."
+                "I can help you update your resume. Ask a question, paste "
+                "biodata, or tell me which section to update."
             ),
         )
 
@@ -222,14 +184,15 @@ def direct_reply(
     message: str,
     decision: RouteDecision,
     *,
-    catalog: Optional[List[Dict[str, Any]]] = None,
+    catalog: list[dict[str, Any]] | None = None,
 ) -> str:
+    """Generate or retrieve direct reply for conversational interactions."""
     if decision.reply:
         return decision.reply
     if catalog:
         lines = ", ".join(
-            f"Zone {c['zone_no']} ({c.get('description') or '…'})"
+            f"Zone {c['zone_no']} ({c.get('description') or '...'})"
             for c in catalog
         )
-        return f"Current zones: {lines}. What should I change?"
-    return "Paste your biodata or tell me which zone to update."
+        return f"Current sections: {lines}. What would you like to do?"
+    return "Paste your biodata or tell me which section to update."
