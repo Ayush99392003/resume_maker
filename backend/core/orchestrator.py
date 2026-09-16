@@ -5,36 +5,44 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 # Regex to detect transient provider-level failures that make retrying
 # pointless: rate limits, quota exhaustion, 503/overload, bad gateway.
 _PROVIDER_DOWN_RE = re.compile(
     r"rate.?limit|quota|overload|503|502|service.unavailable|too.many.requests",
-    re.I,
+    re.IGNORECASE,
 )
 
 from pydantic import BaseModel, Field
 
 try:
-    from llm_router import ChatMessage, llm_router
     from core.logging_setup import get_logger
+    from core.tools import (
+        CONTENT_TOOLS_DESCRIPTION,
+        STRUCTURE_TOOLS_DESCRIPTION,
+    )
     from core.zone_agents import (
-        zone_agent_router,
-        _extract_delimited,
-        _pre_escape_backslashes,
         _clean_backslash_typos,
         _escape_raw_latex_chars,
+        _extract_delimited,
+        _pre_escape_backslashes,
+        zone_agent_router,
     )
+    from llm_router import ChatMessage, llm_router
 except ImportError:
     from ..llm_router import ChatMessage, llm_router  # type: ignore
     from .logging_setup import get_logger
+    from .tools import (
+        CONTENT_TOOLS_DESCRIPTION,
+        STRUCTURE_TOOLS_DESCRIPTION,
+    )
     from .zone_agents import (
-        zone_agent_router,
-        _extract_delimited,
-        _pre_escape_backslashes,
         _clean_backslash_typos,
         _escape_raw_latex_chars,
+        _extract_delimited,
+        _pre_escape_backslashes,
+        zone_agent_router,
     )
 
 from .zone_document import ZoneDocument
@@ -74,26 +82,26 @@ def _extract_json(text: str) -> dict:
 
 class OrchStep(BaseModel):
     intent: str
-    zone_nos: List[int] = Field(default_factory=list)
+    zone_nos: list[int] = Field(default_factory=list)
     description: str = ""
-    after_zone_no: Optional[int] = None
+    after_zone_no: int | None = None
     at_start: bool = False
-    new_order: List[int] = Field(default_factory=list)
-    swap: List[int] = Field(default_factory=list)
+    new_order: list[int] = Field(default_factory=list)
+    swap: list[int] = Field(default_factory=list)
 
 
 class OrchPlan(BaseModel):
-    steps: List[OrchStep] = Field(default_factory=list)
-    clarify: Optional[str] = None
+    steps: list[OrchStep] = Field(default_factory=list)
+    clarify: str | None = None
     reason: str = ""
 
 
 class OrchResult(BaseModel):
     reply: str
     document: ZoneDocument
-    zones_changed: List[str] = Field(default_factory=list)
-    resolved_zones: List[str] = Field(default_factory=list)
-    tool_trace: List[Dict[str, Any]] = Field(default_factory=list)
+    zones_changed: list[str] = Field(default_factory=list)
+    resolved_zones: list[str] = Field(default_factory=list)
+    tool_trace: list[dict[str, Any]] = Field(default_factory=list)
     provider: str = ""
     model: str = ""
 
@@ -102,11 +110,11 @@ def _llm_json(
     system: str,
     user: str,
     *,
-    provider: Optional[str],
-    model: Optional[str],
-    api_key: Optional[str],
+    provider: str | None,
+    model: str | None,
+    api_key: str | None,
     temperature: float = 0.3,
-) -> Tuple[dict, str, str]:
+) -> tuple[dict, str, str]:
     resp = llm_router.chat(
         [
             ChatMessage(role="system", content=system),
@@ -121,7 +129,7 @@ def _llm_json(
     return _extract_json(resp.content), resp.provider, resp.model
 
 
-def _match_zone_by_text(doc: ZoneDocument, text: str) -> Optional[int]:
+def _match_zone_by_text(doc: ZoneDocument, text: str) -> int | None:
     lower = text.lower()
     m = re.search(r"zone\s*(\d+)", lower)
     if m:
@@ -160,10 +168,11 @@ def plan_intents(
     doc: ZoneDocument,
     *,
     is_first_fill: bool,
-    target_zone: Optional[str] = None,
-    provider: Optional[str],
-    model: Optional[str],
-    api_key: Optional[str],
+    target_zone: str | None = None,
+    category: str | None = None,
+    provider: str | None,
+    model: str | None,
+    api_key: str | None,
 ) -> OrchPlan:
     catalog = doc.catalog()
 
@@ -197,13 +206,6 @@ def plan_intents(
             )
 
     def _looks_unfilled() -> bool:
-        """Return True only when a majority (>=60%) of zones are empty.
-
-        Previously any single empty zone would trigger a full rewrite when
-        the message was long enough.  The new threshold prevents spurious
-        full rewrites when the user pastes a bio on a session that already
-        has most zones filled.
-        """
         if not doc.zones:
             return True
         empty_count = 0
@@ -213,17 +215,13 @@ def plan_intents(
                 "",
                 "% empty zone",
                 "% TODO",
-            }:
-                empty_count += 1
-            elif (
+            } or (
                 inner.strip().startswith("%") and len(inner.strip()) < 40
             ):
                 empty_count += 1
-        # Require >= 60% of zones to be empty to justify a full rewrite
         threshold = max(1, round(len(doc.zones) * 0.6))
         return empty_count >= threshold
 
-    # Raise length threshold 180 → 250 to reduce accidental full rewrites
     if is_first_fill or (len(message) >= 250 and _looks_unfilled()):
         return OrchPlan(
             steps=[
@@ -236,188 +234,255 @@ def plan_intents(
             reason="first_fill",
         )
 
-    # Keyword structural ops before LLM
-    lower = message.lower()
-    if re.search(r"\b(add zone|add a |add an |new zone|insert zone)\b", lower):
-        desc_m = re.search(
-            r"add (?:a |an |zone )?(?:for )?([a-zA-Z][a-zA-Z0-9 /|-]{2,40})",
-            message,
-            re.I,
-        )
-        description = (desc_m.group(1).strip() if desc_m else "Custom section")
-        description = re.sub(
-            r"\b(under|above|after|before|the|header)\b.*",
-            "",
-            description,
-            flags=re.I,
-        ).strip() or "Custom section"
-        after = None
-        at_start = bool(re.search(r"\b(at top|as header|first)\b", lower))
-        if "under the header" in lower or "after header" in lower:
-            # first zone often header
-            after = doc.zone_order[0] if doc.zone_order else None
-        return OrchPlan(
-            steps=[
-                OrchStep(
-                    intent="add_zone",
-                    description=description,
-                    after_zone_no=after,
-                    at_start=at_start,
-                )
-            ],
-            reason="keyword_add",
-        )
-
-    # Only treat as zone removal if user explicitly targets a zone/section
-    # as a whole. "remove X from Y" = content edit, not zone removal.
-    _ZONE_REMOVE_RE = re.compile(
-        r"\b(remove zone|delete zone|drop zone"
-        r"|remove the .{0,30}(zone|section)"
-        r"|delete the .{0,30}(zone|section)"
-        r"|drop the .{0,30}(zone|section))\b",
-        re.IGNORECASE,
-    )
-    if _ZONE_REMOVE_RE.search(lower):
-        target = _match_zone_by_text(doc, message)
-        m = re.search(r"zone\s*(\d+)", lower)
-        if m:
-            target = int(m.group(1))
-        if target is None:
-            return OrchPlan(
-                clarify=(
-                    "Which zone should I remove? "
-                    "Give a zone number or name."
-                ),
-                reason="remove_unclear",
-            )
-        return OrchPlan(
-            steps=[OrchStep(intent="remove_zone", zone_nos=[target])],
-            reason="keyword_remove",
-        )
-
-    swap_m = re.search(r"swap\s+zone\s*(\d+)\s+(?:and|with)\s+zone\s*(\d+)", lower)
-    if swap_m:
-        a, b = int(swap_m.group(1)), int(swap_m.group(2))
-        return OrchPlan(
-            steps=[OrchStep(intent="reorder", swap=[a, b])],
-            reason="keyword_swap",
-        )
-
-    # Fast-path 2: Unambiguous single-zone keyword match (not a zone structure change)
-    target = _match_zone_by_text(doc, message)
-    structural_kws = [
-        "reorder",
-        "swap zone",
-        "add zone",
-        "add a zone",
-        "new zone",
-        "insert zone",
-        "remove zone",
-        "delete zone",
-        "drop zone",
-        "move zone",
-    ]
-    if target is not None and not any(kw in lower for kw in structural_kws):
-        log.info(
-            "orch.step: fast_path unambiguous keyword match -> zone=%s", target
-        )
-        return OrchPlan(
-            steps=[OrchStep(intent="edit", zone_nos=[target])],
-            reason="rule_single_zone",
-        )
-
-    system = (
-        "You are the resume zone orchestrator planner. "
-        "Zones are numbered sections of a resume (e.g. Education, "
-        "Experience, Projects, Skills).\n"
-        "Zones in catalog: use zone_no from the catalog.\n"
-        "\n"
-        "INTENT RULES — choose carefully:\n"
-        "- 'edit': user wants to change, add, remove, or rewrite CONTENT "
-        "INSIDE a zone (e.g. 'remove the Legal Knowledge Graph project', "
-        "'add TypeScript to skills', 'change my GPA'). "
-        "This is the most common intent. When in doubt, use edit.\n"
-        "- 'remove_zone': ONLY when the user explicitly says to delete or "
-        "remove an entire SECTION/ZONE, using phrases like 'remove the "
-        "projects section', 'delete zone 5', 'drop the certifications "
-        "section'. NEVER use remove_zone when the user says 'remove X from "
-        "Y' — that is an edit.\n"
-        "- 'add_zone': user wants a brand-new section added.\n"
-        "- 'reorder': user wants to swap or move sections.\n"
-        "- 'fill': initial population from bio data.\n"
-        "- 'clarify': request is genuinely ambiguous.\n"
-        "\n"
-        "Return JSON: "
-        "{\"steps\":[{\"intent\":\"edit\",\"zone_nos\":[2]}],"
-        "\"clarify\":null,\"reason\":\"...\"}\n"
-        "If unclear which zone, set clarify and empty steps."
-    )
+    # --- Tool-Based Tree Routing (Zero Regex Scraping) ---
     catalog_lines = [
         f"- Zone {c['zone_no']}: {c['description']} ({c['kind']})"
         for c in catalog
     ]
-    user = (
-        f"Zones:\n" + "\n".join(catalog_lines) + "\n\n"
-        f"Current order: {doc.zone_order}\n\n"
-        f"User message:\n{message}"
-    )
+    catalog_txt = "\n".join(catalog_lines)
+
     try:
-        data, _, _ = _llm_json(
-            system,
-            user,
-            provider=provider,
-            model=model,
-            api_key=api_key,
-            temperature=0.1,
-        )
-        clarify = data.get("clarify")
-        steps_raw = data.get("steps") or []
-        steps = []
-        for s in steps_raw:
-            steps.append(
-                OrchStep(
-                    intent=str(s.get("intent") or "edit"),
-                    zone_nos=[int(x) for x in (s.get("zone_nos") or [])],
-                    description=str(s.get("description") or ""),
-                    after_zone_no=s.get("after_zone_no"),
-                    at_start=bool(s.get("at_start")),
-                    new_order=[int(x) for x in (s.get("new_order") or [])],
-                    swap=[int(x) for x in (s.get("swap") or [])],
+        if category == "structure":
+            # Structure Branch: Only load structure tools and minimal catalog
+            system = (
+                "You are the resume structure planner. Select the structural "
+                "tool matching the user's layout request.\n\n"
+                f"{STRUCTURE_TOOLS_DESCRIPTION}"
+            )
+            user_prompt = (
+                f"Current Zones:\n{catalog_txt}\n"
+                f"Current Order: {doc.zone_order}\n\n"
+                f"User request:\n{message}"
+            )
+            data, _, _ = _llm_json(
+                system,
+                user_prompt,
+                provider=provider,
+                model=model,
+                api_key=api_key,
+                temperature=0.1,
+            )
+            tool = (
+                str(data.get("tool") or "")
+                .replace(r"\_", "_")
+                .strip()
+                .lower()
+            )
+            raw_args = data.get("args") or {}
+            args = (
+                {
+                    str(k).replace(r"\_", "_"): v
+                    for k, v in raw_args.items()
+                }
+                if isinstance(raw_args, dict)
+                else {}
+            )
+            reason = str(data.get("reason") or "structure_tool")
+
+            if tool == "add_zone":
+                title = str(args.get("title") or "Custom section")
+                after = args.get("after_zone_no")
+                at_start = bool(args.get("at_start"))
+                return OrchPlan(
+                    steps=[
+                        OrchStep(
+                            intent="add_zone",
+                            description=title,
+                            after_zone_no=after,
+                            at_start=at_start,
+                        )
+                    ],
+                    reason=reason,
                 )
+            elif tool == "remove_zone":
+                zone_nos = [int(x) for x in (args.get("zone_nos") or [])]
+                if not zone_nos:
+                    return OrchPlan(
+                        clarify="Which zone should I remove?",
+                        reason="remove_unclear",
+                    )
+                return OrchPlan(
+                    steps=[OrchStep(intent="remove_zone", zone_nos=zone_nos)],
+                    reason=reason,
+                )
+            elif tool == "reorder_zones":
+                swap = [int(x) for x in (args.get("swap") or [])]
+                new_order = [int(x) for x in (args.get("new_order") or [])]
+                return OrchPlan(
+                    steps=[
+                        OrchStep(intent="reorder", swap=swap, new_order=new_order)
+                    ],
+                    reason=reason,
+                )
+
+        elif category == "content":
+            # Content Branch: Target specific zone content or bio fill
+            system = (
+                "You are the resume content planner. Select the content tool "
+                "and target zone matching the user's request.\n\n"
+                f"{CONTENT_TOOLS_DESCRIPTION}"
             )
-        if clarify and not steps:
-            return OrchPlan(clarify=str(clarify), reason=str(data.get("reason") or ""))
-        if not steps:
-            # default: edit matched zone or fill
-            target = _match_zone_by_text(doc, message)
-            if target is not None:
-                steps = [OrchStep(intent="edit", zone_nos=[target])]
-            else:
-                steps = [
-                    OrchStep(intent="fill", zone_nos=list(doc.zone_order)),
-                    OrchStep(intent="describe", zone_nos=list(doc.zone_order)),
+            user_prompt = (
+                f"Current Zones:\n{catalog_txt}\n\n"
+                f"User request:\n{message}"
+            )
+            data, _, _ = _llm_json(
+                system,
+                user_prompt,
+                provider=provider,
+                model=model,
+                api_key=api_key,
+                temperature=0.1,
+            )
+            tool = (
+                str(data.get("tool") or "")
+                .replace(r"\_", "_")
+                .strip()
+                .lower()
+            )
+            raw_args = data.get("args") or {}
+            args = (
+                {
+                    str(k).replace(r"\_", "_"): v
+                    for k, v in raw_args.items()
+                }
+                if isinstance(raw_args, dict)
+                else {}
+            )
+            reason = str(data.get("reason") or "content_tool")
+
+            if tool == "edit_zone_content":
+                z_no = args.get("zone_no")
+                if z_no is not None and int(z_no) in doc.zone_map():
+                    return OrchPlan(
+                        steps=[OrchStep(intent="edit", zone_nos=[int(z_no)])],
+                        reason=reason,
+                    )
+            elif tool == "fill_resume":
+                z_nos = [
+                    int(x) for x in (args.get("zone_nos") or doc.zone_order)
                 ]
-        return OrchPlan(
-            steps=steps,
-            reason=str(data.get("reason") or "llm_plan"),
-        )
-    except Exception as e:
-        log.exception("orch.error: plan_intents llm failed - %s", e)
-        target = _match_zone_by_text(doc, message)
-        if target is not None:
-            log.info("orch.step: fallback_edit zone=%s", target)
-            return OrchPlan(
-                steps=[OrchStep(intent="edit", zone_nos=[target])],
-                reason="fallback_edit",
+                return OrchPlan(
+                    steps=[
+                        OrchStep(intent="fill", zone_nos=z_nos),
+                        OrchStep(intent="describe", zone_nos=z_nos),
+                    ],
+                    reason=reason,
+                )
+
+        else:
+            # Combined tool schema fallback
+            system = (
+                "You are the resume orchestrator planner. Select the "
+                "appropriate tool for the user's request:\n\n"
+                f"{STRUCTURE_TOOLS_DESCRIPTION}\n\n"
+                f"{CONTENT_TOOLS_DESCRIPTION}"
             )
-        log.info("orch.step: fallback_fill zones=%s", doc.zone_order)
+            user_prompt = (
+                f"Current Zones:\n{catalog_txt}\n"
+                f"Current Order: {doc.zone_order}\n\n"
+                f"User request:\n{message}"
+            )
+            data, _, _ = _llm_json(
+                system,
+                user_prompt,
+                provider=provider,
+                model=model,
+                api_key=api_key,
+                temperature=0.1,
+            )
+            tool = (
+                str(data.get("tool") or "")
+                .replace(r"\_", "_")
+                .strip()
+                .lower()
+            )
+            raw_args = data.get("args") or {}
+            args = (
+                {
+                    str(k).replace(r"\_", "_"): v
+                    for k, v in raw_args.items()
+                }
+                if isinstance(raw_args, dict)
+                else {}
+            )
+            reason = str(data.get("reason") or "combined_tool")
+
+            if tool == "add_zone":
+                return OrchPlan(
+                    steps=[
+                        OrchStep(
+                            intent="add_zone",
+                            description=str(
+                                args.get("title") or "Custom section"
+                            ),
+                            after_zone_no=args.get("after_zone_no"),
+                            at_start=bool(args.get("at_start")),
+                        )
+                    ],
+                    reason=reason,
+                )
+            elif tool == "remove_zone":
+                zone_nos = [int(x) for x in (args.get("zone_nos") or [])]
+                if not zone_nos:
+                    return OrchPlan(
+                        clarify="Which zone should I remove?",
+                        reason="remove_unclear",
+                    )
+                return OrchPlan(
+                    steps=[OrchStep(intent="remove_zone", zone_nos=zone_nos)],
+                    reason=reason,
+                )
+            elif tool == "reorder_zones":
+                return OrchPlan(
+                    steps=[
+                        OrchStep(
+                            intent="reorder",
+                            swap=[int(x) for x in (args.get("swap") or [])],
+                            new_order=[
+                                int(x) for x in (args.get("new_order") or [])
+                            ],
+                        )
+                    ],
+                    reason=reason,
+                )
+            elif tool == "edit_zone_content":
+                z_no = args.get("zone_no")
+                if z_no is not None and int(z_no) in doc.zone_map():
+                    return OrchPlan(
+                        steps=[OrchStep(intent="edit", zone_nos=[int(z_no)])],
+                        reason=reason,
+                    )
+            elif tool == "fill_resume":
+                z_nos = [
+                    int(x) for x in (args.get("zone_nos") or doc.zone_order)
+                ]
+                return OrchPlan(
+                    steps=[
+                        OrchStep(intent="fill", zone_nos=z_nos),
+                        OrchStep(intent="describe", zone_nos=z_nos),
+                    ],
+                    reason=reason,
+                )
+    except Exception:
+        log.exception("orch.error: plan_intents tool router failed")
+
+    # Fallback to text match if tool call failed or was unrecognized
+    target = _match_zone_by_text(doc, message)
+    if target is not None:
+        log.info("orch.step: fallback_edit zone=%s", target)
         return OrchPlan(
-            steps=[
-                OrchStep(intent="fill", zone_nos=list(doc.zone_order)),
-                OrchStep(intent="describe", zone_nos=list(doc.zone_order)),
-            ],
-            reason="fallback_fill",
+            steps=[OrchStep(intent="edit", zone_nos=[target])],
+            reason="fallback_edit",
         )
+    log.info("orch.step: fallback_fill zones=%s", doc.zone_order)
+    return OrchPlan(
+        steps=[
+            OrchStep(intent="fill", zone_nos=list(doc.zone_order)),
+            OrchStep(intent="describe", zone_nos=list(doc.zone_order)),
+        ],
+        reason="fallback_fill",
+    )
 
 
 def _edit_zone_latex(
@@ -428,10 +493,10 @@ def _edit_zone_latex(
     digest: str,
     user_message: str,
     is_fill: bool,
-    provider: Optional[str],
-    model: Optional[str],
-    api_key: Optional[str],
-) -> Tuple[str, str, str, str]:
+    provider: str | None,
+    model: str | None,
+    api_key: str | None,
+) -> tuple[str, str, str, str]:
     mode = "initial fill from biodata" if is_fill else "targeted edit"
     system = (
         f"You are editing Zone {zone_no} of a LaTeX resume "
@@ -501,12 +566,12 @@ def _edit_zone_latex(
 
 def _describe_zones(
     doc: ZoneDocument,
-    zone_nos: List[int],
+    zone_nos: list[int],
     *,
-    provider: Optional[str],
-    model: Optional[str],
-    api_key: Optional[str],
-) -> Tuple[Dict[int, str], str, str]:
+    provider: str | None,
+    model: str | None,
+    api_key: str | None,
+) -> tuple[dict[int, str], str, str]:
     payload = []
     for n in zone_nos:
         try:
@@ -528,7 +593,7 @@ def _describe_zones(
         temperature=0.1,
     )
     raw = data.get("descriptions") or {}
-    out: Dict[int, str] = {}
+    out: dict[int, str] = {}
     for k, v in raw.items():
         try:
             out[int(k)] = str(v).strip()
@@ -562,16 +627,18 @@ class Orchestrator:
         user_message: str,
         document: ZoneDocument,
         is_first_fill: bool = False,
-        target_zone: Optional[str] = None,
-        provider: Optional[str] = None,
-        model: Optional[str] = None,
-        api_key: Optional[str] = None,
+        target_zone: str | None = None,
+        category: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
     ) -> OrchResult:
         doc = document.model_copy(deep=True)
         log.info(
-            "orch.step: plan start first_fill=%s target_zone=%s zones=%s msg_chars=%s",
+            "orch.step: plan start first_fill=%s target_zone=%s category=%s zones=%s msg_chars=%s",
             is_first_fill,
             target_zone,
+            category,
             doc.zone_order,
             len(user_message or ""),
         )
@@ -581,6 +648,7 @@ class Orchestrator:
                 doc,
                 is_first_fill=is_first_fill,
                 target_zone=target_zone,
+                category=category,
                 provider=provider,
                 model=model,
                 api_key=api_key,
@@ -594,13 +662,13 @@ class Orchestrator:
             [s.intent for s in plan.steps],
             bool(plan.clarify),
         )
-        trace: List[Dict[str, Any]] = [
+        trace: list[dict[str, Any]] = [
             {"tool": "orchestrator.plan", "plan": plan.model_dump()}
         ]
         used_provider = provider or ""
         used_model = model or ""
-        changed: List[str] = []
-        summaries: List[str] = []
+        changed: list[str] = []
+        summaries: list[str] = []
 
         if plan.clarify and not plan.steps:
             log.info("orch.step: clarify only — %s", plan.clarify[:120])
@@ -860,7 +928,7 @@ class Orchestrator:
             len(reply),
         )
 
-        resolved_names: List[str] = []
+        resolved_names: list[str] = []
         zmap = doc.zone_map()
         for zid in changed:
             if zid.isdigit() and int(zid) in zmap:
