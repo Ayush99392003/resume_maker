@@ -520,6 +520,7 @@ class AIAgent:
         decision = classify_route(
             user_message,
             catalog=catalog,
+            history=history,
             target_zone=target_zone,
             provider=provider,
             model=model,
@@ -530,9 +531,9 @@ class AIAgent:
         if is_first_fill and decision.route == "direct_reply":
             lower = user_message.strip().lower().rstrip("!.")
             if lower not in {"hi", "hello", "hey", "thanks", "thank you", "thx"}:
-                decision.route = "orchestrator"
+                decision.route = "content"
                 decision.reason = "first_fill_override"
-                log.info("agent.step: first_fill_override → orchestrator")
+                log.info("agent.step: first_fill_override -> content")
 
         log.info(
             "agent.step: route=%s reason=%s",
@@ -562,11 +563,17 @@ class AIAgent:
             )
 
         try:
+            category = (
+                decision.route
+                if decision.route in ("structure", "content")
+                else None
+            )
             result = orchestrator.run(
                 user_message=user_message,
                 document=doc,
                 is_first_fill=is_first_fill,
                 target_zone=target_zone,
+                category=category,
                 provider=provider,
                 model=model,
                 api_key=api_key,
