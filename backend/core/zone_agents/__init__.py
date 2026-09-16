@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -15,6 +16,25 @@ except ImportError:
     from ..logging_setup import get_logger
 
 log = get_logger("zone_agents")
+
+
+def _extract_json(text: str) -> dict:
+    """Extract and parse JSON object from LLM response string."""
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    text = _pre_escape_backslashes(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except Exception:
+                pass
+        return {}
 
 
 def _pre_escape_backslashes(raw: str) -> str:
@@ -651,27 +671,9 @@ class ZoneAgentRouter:
                 chosen.append(available_upper[key])
             elif key in self.agents and key in available_upper:
                 chosen.append(available_upper[key])
-        if not chosen:
-            # keyword fallback
-            msg = user_message.lower()
-            mapping = [
-                (("experience", "job", "work", "role", "company"), "EXPERIENCE"),
-                (("project", "portfolio", "github"), "PROJECTS"),
-                (("education", "degree", "university", "college"), "EDUCATION"),
-                (("skill", "stack", "technolog"), "SKILLS"),
-                (("summary", "about", "profile", "objective"), "SUMMARY"),
-                (("name", "email", "phone", "contact", "header", "address"), "HEADER"),
-            ]
-            for keys, zid in mapping:
-                if any(k in msg for k in keys) and zid in available_upper:
-                    chosen.append(available_upper[zid])
         if not chosen and available:
-            # last resort: summary or first zone
-            chosen = [
-                available_upper.get("SUMMARY")
-                or available_upper.get("EXPERIENCE")
-                or available[0]
-            ]
+            # fallback if model did not return a valid zone
+            chosen = [available[0]]
         # de-dupe preserve order
         seen = set()
         out = []
