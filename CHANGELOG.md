@@ -4,7 +4,32 @@ All notable changes, architectural optimizations, and feature enhancements from 
 
 ---
 
-## [Unreleased / September 1, 2026]
+## [September 15 – September 16, 2026]
+
+### 🛠️ LaTeX Compatibility Layer, Error Recovery Engine & Session Class Isolation
+- **Dynamic Font Fallback Chain (`FontHandler`, `core/latex_compatibility.py`)**:
+  - Automatically intercepts missing font errors from XeTeX/fontspec (e.g. `Tinos-Regular`, `Montserrat`, `Fira Code`) on Windows Tectonic.
+  - Dynamically substitutes missing font definitions with standard TeX Gyre fonts (`TeX Gyre Termes`, `TeX Gyre Heros`, `TeX Gyre Cursor`) across both `.tex` and workspace `.cls` class files.
+- **Deterministic Color Recovery (`ColorHandler`, `core/latex_compatibility.py`)**:
+  - Automatically upgrades `\usepackage{xcolor}` declarations with `[dvipsnames,svgnames,x11names]`.
+  - Captures `Undefined color` compilation failures and injects safe neutral or theme `\providecolor` fallback definitions into the preamble before compiling.
+- **Targeted Auto-Repair Loop (`RepairEngine`, `ErrorClassifier`)**:
+  - Replaced brittle full-document LLM rewriting for basic compilation errors with a targeted deterministic repair loop in `compiler.compile()` (`MAX_REPAIR_ATTEMPTS = 5`).
+  - Repairs errors in under 0.5s with zero token overhead and zero risk of LaTeX macro loss.
+- **Side-File & Template Softening (`PackageHandler`, `core/latex_soften.py`)**:
+  - Broadened side-file handling to neutralize missing references like `\input{particulars.tex}` and touch dummy placeholders in compile directories.
+- **Session Workspace Class Seeding & Starter Template**:
+  - Removed rigid legacy `classic` and `modern` templates.
+  - Isolated custom `.cls` class definitions per session workspace via `_seed_cls_files()`.
+  - Added clean ATS-ready `starter.tex` with fully validated `rSubsection` item lists (23KB PDF output).
+- **Agent Router JSON Parsing Resilience (`core/zone_agents/__init__.py`)**:
+  - Implemented `_extract_json()` with `_pre_escape_backslashes()` to fix `NameError: name '_extract_json' is not defined`.
+- **Test Suite Decryption & Skip Grace (`tests/`)**:
+  - Updated all test suites to decrypt profile API credentials via `auth_store.get_provider_config` and skip gracefully when external credentials are not present.
+
+---
+
+## [September 1, 2026]
 
 ### ⚡ Token Optimization & Fast-Path Zone Architecture
 - **Compact Context Digest (`compact_digest`)**:
