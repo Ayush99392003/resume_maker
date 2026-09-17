@@ -92,15 +92,11 @@ export default function App() {
   const [provider, setProvider] = useState('groq');
   const [model, setModel] = useState('openai/gpt-oss-120b');
   const [providerInfo, setProviderInfo] = useState(null);
-  // New-chat setup: either template URL/paste OR zone selection
+  // New-chat setup state
   const [setupMode, setSetupMode] = useState(false);
-  const [setupPath, setSetupPath] = useState('url'); // 'url' | 'zones'
-  const [setupCatalog, setSetupCatalog] = useState([]);
-  const [setupSelected, setSetupSelected] = useState([]);
   const [setupLatexPaste, setSetupLatexPaste] = useState('');
   const [setupLoading, setSetupLoading] = useState(false);
   const [setupError, setSetupError] = useState('');
-  const [setupCustomDesc, setSetupCustomDesc] = useState('');
   const [selectedTargetZone, setSelectedTargetZone] = useState('auto');
   const [undoDepth, setUndoDepth] = useState(0);
   const [compileNote, setCompileNote] = useState('');
@@ -245,12 +241,9 @@ export default function App() {
   };
 
   const resetSetupState = () => {
-    setSetupPath('url');
-    setSetupCatalog([]);
-    setSetupSelected([]);
+    setOverleafUrl('');
     setSetupLatexPaste('');
     setSetupError('');
-    setSetupCustomDesc('');
     setSetupLoading(false);
   };
 
@@ -371,17 +364,17 @@ export default function App() {
     }
   };
 
-  const loadZonesCatalog = async (templateName = selectedTemplate) => {
+  /** Load zones catalog — kept for zone panel inside active chat */
+  const loadZonesCatalog = async () => {
+    if (!sessionId) return;
     setSetupError('');
     setSetupLoading(true);
     try {
       const resp = await axios.post(`${API_BASE}/setup/import`, {
-        template_name: templateName,
+        template_name: 'starter',
       });
       const catalog = resp.data.catalog || [];
-      setSetupCatalog(catalog);
-      setSetupSelected(catalog.map((z) => z.zone_no));
-      setLatexCode(resp.data.latex_code || '');
+      setZoneCatalog(catalog);
     } catch (e) {
       setSetupError(errDetail(e, 'Could not load zones'));
     } finally {
@@ -389,24 +382,23 @@ export default function App() {
     }
   };
 
-  const toggleSetupZone = (zoneNo) => {
-    setSetupSelected((prev) => (
-      prev.includes(zoneNo)
-        ? prev.filter((n) => n !== zoneNo)
-        : [...prev, zoneNo]
-    ));
-  };
-
-  const addSetupCustomZone = () => {
-    const desc = (setupCustomDesc || '').trim();
-    if (!desc) return;
-    const tempNo = -(setupCatalog.length + 1);
-    setSetupCatalog((prev) => [
-      ...prev,
-      { zone_no: tempNo, description: desc, kind: 'custom', _pending: true },
-    ]);
-    setSetupSelected((prev) => [...prev, tempNo]);
-    setSetupCustomDesc('');
+  /** Path Ø: Fresh start — POST /sessions with no URL/latex, uses starter.tex */
+  const startChatFresh = async () => {
+    setSetupError('');
+    setSetupLoading(true);
+    try {
+      const created = await axios.post(`${API_BASE}/sessions`, {
+        provider,
+        model,
+        template_name: 'starter',
+      });
+      enterChatFromSession(created.data);
+      await loadSessions();
+    } catch (e) {
+      setSetupError(errDetail(e, 'Could not start fresh session'));
+    } finally {
+      setSetupLoading(false);
+    }
   };
 
   /** Path A: Overleaf URL or pasted .tex → session → chat + render */
@@ -474,39 +466,6 @@ export default function App() {
     }
   };
 
-  /** Path B: bundled template + selected zones → session → chat */
-  const startChatFromZones = async () => {
-    if (!setupSelected.length) {
-      setSetupError('Select at least one zone');
-      return;
-    }
-    setSetupError('');
-    setSetupLoading(true);
-    try {
-      const included = setupSelected.filter((n) => n > 0);
-      const order = setupCatalog
-        .map((z) => z.zone_no)
-        .filter((n) => included.includes(n));
-      const customs = setupCatalog
-        .filter((z) => z._pending && setupSelected.includes(z.zone_no))
-        .map((z) => z.description);
-
-      const created = await axios.post(`${API_BASE}/sessions`, {
-        template_name: selectedTemplate,
-        provider,
-        model,
-        included_zone_nos: included,
-        zone_order: order,
-        custom_zones: customs,
-      });
-      enterChatFromSession(created.data);
-      await loadSessions();
-    } catch (e) {
-      setSetupError(errDetail(e, 'Could not start from zone selection'));
-    } finally {
-      setSetupLoading(false);
-    }
-  };
 
   const addZone = async () => {
     if (!sessionId || setupMode) return;
@@ -777,7 +736,6 @@ export default function App() {
             session_id: sid,
             message: text,
             target_zone: targetZoneToSend,
-            template_name: selectedTemplate,
             ...llmPayload(),
           });
           applyResult(resp.data);
@@ -1156,182 +1114,92 @@ export default function App() {
             <div className="flex-1 overflow-auto px-4 py-4 space-y-4">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wider text-ink-500">
-                  New chat setup
+                  New chat
                 </p>
                 <p className="mt-1 text-sm text-ink-700">
-                  Pick either a template URL/LaTeX paste, or zone selection — then start chat.
+                  Choose how to start your resume.
                 </p>
-                <div className="mt-3 grid grid-cols-2 gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => { setSetupPath('url'); setSetupError(''); }}
-                    className={`h-9 rounded-md text-[11px] font-semibold border ${
-                      setupPath === 'url'
-                        ? 'bg-ink-900 text-white border-ink-900'
-                        : 'bg-white text-ink-600 border-ink-200'
-                    }`}
-                  >
-                    Template URL
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSetupPath('zones');
-                      setSetupError('');
-                      if (!setupCatalog.length) loadZonesCatalog();
-                    }}
-                    className={`h-9 rounded-md text-[11px] font-semibold border ${
-                      setupPath === 'zones'
-                        ? 'bg-ink-900 text-white border-ink-900'
-                        : 'bg-white text-ink-600 border-ink-200'
-                    }`}
-                  >
-                    Zone selection
-                  </button>
-                </div>
               </div>
 
-              {setupPath === 'url' && (
-                <div className="space-y-3">
-                  <div>
-                    <p className="text-[11px] font-semibold text-ink-500 mb-1.5">Overleaf template URL</p>
-                    <input
-                      value={overleafUrl}
-                      onChange={(e) => setOverleafUrl(e.target.value)}
-                      placeholder="https://www.overleaf.com/latex/templates/name/id"
-                      className="w-full h-9 rounded-md border border-ink-200 px-2 text-xs text-ink-800"
-                    />
-                    <p className="mt-1 text-[10px] text-ink-500 leading-snug">
-                      Use a public gallery link (`/latex/templates/…`) or a public project/read link.
-                      We download the zip (with .cls/.sty/images), convert zones, then render.
-                      Private projects: paste .tex below instead.
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[11px] font-semibold text-ink-500 mb-1.5">
-                      Or paste full LaTeX (no URL needed)
-                    </p>
-                    <textarea
-                      value={setupLatexPaste}
-                      onChange={(e) => setSetupLatexPaste(e.target.value)}
-                      placeholder={'\\documentclass{article}\n\\begin{document}\n...\n\\end{document}'}
-                      className="w-full h-36 rounded-md border border-ink-200 p-2 text-[11px] font-mono resize-none"
-                    />
-                    <p className="mt-1 text-[10px] text-ink-500 leading-snug">
-                      Paste the whole <code>.tex</code>, then start — we convert zones and render the PDF.
-                      Heavy packages (fontawesome / FiraMono) are softened for Windows Tectonic.
-                    </p>
-                  </div>
-                  {setupError && <p className="text-xs text-red-600">{setupError}</p>}
-                  <button
-                    type="button"
-                    onClick={startChatFromUrl}
-                    disabled={setupLoading}
-                    className="w-full h-10 rounded-md bg-accent text-white text-sm font-semibold disabled:opacity-40"
-                  >
-                    {setupLoading
-                      ? 'Importing & rendering…'
-                      : (setupLatexPaste || '').trim()
-                        ? 'Start chat & render pasted LaTeX'
-                        : 'Start chat from template URL'}
-                  </button>
-                </div>
-              )}
+              {/* Option 1 — Start Fresh */}
+              <div className="rounded-xl border border-ink-200 p-4 space-y-2 hover:border-accent/50 transition-colors">
+                <p className="text-sm font-semibold text-ink-900">⚡ Start Fresh</p>
+                <p className="text-[11px] text-ink-500 leading-snug">
+                  Instantly create an ATS-ready resume using the standard{' '}
+                  <code className="font-mono text-[10px] bg-ink-100 px-1 rounded">resume.cls</code>{' '}
+                  template. Paste your bio in chat to fill all sections automatically.
+                </p>
+                {setupError && <p className="text-xs text-red-600">{setupError}</p>}
+                <button
+                  type="button"
+                  id="start-fresh-btn"
+                  onClick={startChatFresh}
+                  disabled={setupLoading}
+                  className="w-full h-10 rounded-lg bg-ink-900 text-white text-sm font-semibold hover:bg-ink-800 transition-colors disabled:opacity-40"
+                >
+                  {setupLoading ? 'Creating…' : 'Start fresh resume'}
+                </button>
+              </div>
 
-              {setupPath === 'zones' && (
-                <div className="space-y-3">
-                  <div>
-                    <p className="text-[11px] font-semibold text-ink-500 mb-1.5">Base template</p>
-                    <div className="flex gap-1.5">
-                      {['classic', 'modern', 'executive'].map((t) => (
-                        <button
-                          key={t}
-                          type="button"
-                          onClick={() => {
-                            setSelectedTemplate(t);
-                            setSetupCatalog([]);
-                            setSetupSelected([]);
-                            loadZonesCatalog(t);
-                          }}
-                          className={`flex-1 h-8 rounded-md text-[11px] font-semibold capitalize border ${
-                            selectedTemplate === t
-                              ? 'bg-ink-900 text-white border-ink-900'
-                              : 'bg-white text-ink-600 border-ink-200'
-                          }`}
-                        >
-                          {t}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <p className="text-[11px] font-semibold text-ink-500 uppercase tracking-wider">
-                      Include zones
-                    </p>
-                    <button
-                      type="button"
-                      onClick={loadZonesCatalog}
-                      className="text-[11px] text-ink-500 hover:text-ink-800"
-                    >
-                      Reload
-                    </button>
-                  </div>
-                  <div className="space-y-1.5 max-h-56 overflow-auto">
-                    {setupCatalog.length === 0 && !setupLoading && (
-                      <p className="text-xs text-ink-500">Loading zones…</p>
-                    )}
-                    {setupCatalog.map((z) => {
-                      const checked = setupSelected.includes(z.zone_no);
-                      return (
-                        <label
-                          key={z.zone_no}
-                          className={`flex items-center gap-2 rounded-md border px-2.5 py-2 cursor-pointer ${
-                            checked ? 'border-accent bg-accent-soft/40' : 'border-ink-200 bg-white'
-                          }`}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() => toggleSetupZone(z.zone_no)}
-                          />
-                          <span className="text-xs font-semibold text-ink-900">
-                            {z.zone_no > 0 ? `Zone ${z.zone_no}` : 'Custom'}
-                          </span>
-                          <span className="text-xs text-ink-600 truncate">{z.description}</span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                  <div className="flex gap-2">
-                    <input
-                      value={setupCustomDesc}
-                      onChange={(e) => setSetupCustomDesc(e.target.value)}
-                      placeholder="Add custom zone name…"
-                      className="flex-1 h-9 rounded-md border border-ink-200 px-2 text-xs"
-                      onKeyDown={(e) => e.key === 'Enter' && addSetupCustomZone()}
-                    />
-                    <button
-                      type="button"
-                      onClick={addSetupCustomZone}
-                      className="h-9 px-3 rounded-md border border-ink-200 text-xs font-semibold"
-                    >
-                      Add
-                    </button>
-                  </div>
-                  {setupError && <p className="text-xs text-red-600">{setupError}</p>}
-                  <button
-                    type="button"
-                    onClick={startChatFromZones}
-                    disabled={setupLoading || !setupSelected.length}
-                    className="w-full h-10 rounded-md bg-accent text-white text-sm font-semibold disabled:opacity-40"
-                  >
-                    {setupLoading ? 'Starting…' : 'Start chat from zones'}
-                  </button>
+              {/* Option 2 — Import / Paste */}
+              <div className="rounded-xl border border-ink-200 p-4 space-y-3">
+                <p className="text-sm font-semibold text-ink-900">📄 Import / Paste LaTeX</p>
+                <p className="text-[11px] text-ink-500 leading-snug">
+                  Bring your own Overleaf template or paste a full <code>.tex</code> file.
+                  Custom <code>.cls</code> and <code>.sty</code> files from Overleaf ZIPs are
+                  preserved in your session workspace.
+                </p>
+                <div>
+                  <p className="text-[11px] font-semibold text-ink-500 mb-1.5">Overleaf template URL</p>
+                  <input
+                    id="overleaf-url-input"
+                    value={overleafUrl}
+                    onChange={(e) => setOverleafUrl(e.target.value)}
+                    placeholder="https://www.overleaf.com/latex/templates/name/id"
+                    className="w-full h-9 rounded-md border border-ink-200 px-2 text-xs text-ink-800"
+                  />
+                  <p className="mt-1 text-[10px] text-ink-500 leading-snug">
+                    Public gallery or project/read link. We download the zip (including .cls/.sty/images),
+                    extract into your session workspace, then render.
+                  </p>
                 </div>
-              )}
+                <div>
+                  <p className="text-[11px] font-semibold text-ink-500 mb-1.5">
+                    Or paste full LaTeX (no URL needed)
+                  </p>
+                  <textarea
+                    id="latex-paste-textarea"
+                    value={setupLatexPaste}
+                    onChange={(e) => setSetupLatexPaste(e.target.value)}
+                    placeholder={'\\documentclass{resume}\n\\begin{document}\n...\n\\end{document}'}
+                    className="w-full h-32 rounded-md border border-ink-200 p-2 text-[11px] font-mono resize-none"
+                  />
+                  <p className="mt-1 text-[10px] text-ink-500 leading-snug">
+                    Paste the whole <code>.tex</code> file. Your session workspace includes{' '}
+                    <code>resume.cls</code> so <code>\documentclass{'{resume}'}</code> compiles
+                    without errors.
+                  </p>
+                </div>
+                {setupError && <p className="text-xs text-red-600">{setupError}</p>}
+                <button
+                  type="button"
+                  id="import-latex-btn"
+                  onClick={startChatFromUrl}
+                  disabled={setupLoading || (!overleafUrl.trim() && !setupLatexPaste.trim())}
+                  className="w-full h-10 rounded-lg bg-accent text-white text-sm font-semibold hover:opacity-90 transition-opacity disabled:opacity-40"
+                >
+                  {setupLoading
+                    ? 'Importing & rendering…'
+                    : setupLatexPaste.trim()
+                      ? 'Start chat & render pasted LaTeX'
+                      : 'Start chat from Overleaf URL'}
+                </button>
+              </div>
             </div>
+
           ) : (
           <>
+
           <div className="px-4 py-3 border-b border-ink-200 space-y-2">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-1.5">
