@@ -4,6 +4,7 @@ import asyncio
 import sys
 import uuid
 from pathlib import Path
+
 import pytest
 from fastapi import HTTPException
 
@@ -11,14 +12,14 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from core.session_store import (  # noqa: E402
-    session_store,
-    push_turn_snapshot,
-    tag_turn_snapshot,
+from core.auth_store import auth_store
+from core.session_store import (
     pop_turn_snapshot,
+    push_turn_snapshot,
+    session_store,
+    tag_turn_snapshot,
 )
-from core.auth_store import auth_store  # noqa: E402
-from main import undo_last_turn  # noqa: E402
+from main import undo_last_turn
 
 
 def test_turn_snapshot_push_tag_pop():

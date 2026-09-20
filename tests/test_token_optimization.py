@@ -1,15 +1,15 @@
 """Unit tests for token optimization, compact_digest, and fast-path zone routing."""
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parents[1] / "backend"
 sys.path.insert(0, str(BACKEND))
 
 import pytest
-from core.zone_document import ZoneDocument, ZoneRecord
 from core.chat_router import classify_route
-from core.orchestrator import plan_intents, _match_zone_by_text
+from core.orchestrator import plan_intents
+from core.zone_document import ZoneDocument, ZoneRecord
 
 
 @pytest.fixture

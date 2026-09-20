@@ -2,45 +2,45 @@
 
 from __future__ import annotations
 
-import json
-import re
 import uuid
-from typing import Any, Dict, List, Optional, Tuple  # Any used by ensure_zone_document
+from typing import Any  # Any used by ensure_zone_document
 
 from pydantic import BaseModel, Field
 
 try:
-    from llm_router import ChatMessage, llm_router
-    from core.zones import zone_engine, ZoneError
-    from core.zone_agents import zone_agent_router
+    from core import config
     from core.chat_router import classify_route, direct_reply
-    from core.orchestrator import orchestrator
+    from core.delta_patcher import apply_zone_delta, patch_latex
+    from core.latex_sanitizer import safe_extract_json
     from core.latex_to_zones import latex_to_zones
+    from core.line_indexer import build_debug_payload
+    from core.logging_setup import get_logger
+    from core.orchestrator import orchestrator
+    from core.zone_agents import zone_agent_router
     from core.zone_document import (
         ZoneDocument,
         document_from_session,
         sync_session_from_document,
     )
-    from core.logging_setup import get_logger
-    from core.line_indexer import build_debug_payload
-    from core.delta_patcher import patch_latex, apply_zone_delta
-    from core import config  # noqa: F401
+    from core.zones import ZoneError, zone_engine
+    from llm_router import ChatMessage, llm_router
 except ImportError:
     from ..llm_router import ChatMessage, llm_router
-    from .zones import zone_engine, ZoneError
-    from .zone_agents import zone_agent_router
+    from . import config  # noqa: F401
     from .chat_router import classify_route, direct_reply
-    from .orchestrator import orchestrator
+    from .delta_patcher import apply_zone_delta, patch_latex
+    from .latex_sanitizer import safe_extract_json
     from .latex_to_zones import latex_to_zones
+    from .line_indexer import build_debug_payload
+    from .logging_setup import get_logger
+    from .orchestrator import orchestrator
+    from .zone_agents import zone_agent_router
     from .zone_document import (
         ZoneDocument,
         document_from_session,
         sync_session_from_document,
     )
-    from .logging_setup import get_logger
-    from .line_indexer import build_debug_payload
-    from .delta_patcher import patch_latex, apply_zone_delta
-    from . import config  # noqa: F401
+    from .zones import zone_engine
 
 log = get_logger("ai_agent")
 
@@ -49,7 +49,7 @@ class ResumeUpdate(BaseModel):
     latex_code: str = Field(..., description="Full LaTeX document.")
     summary_of_changes: str = Field(..., description="Brief explanation.")
     is_complete_document: bool = Field(True, description="True if full doc.")
-    zones_changed: List[str] = Field(default_factory=list)
+    zones_changed: list[str] = Field(default_factory=list)
 
 
 class ProposalVariant(BaseModel):
@@ -57,70 +57,28 @@ class ProposalVariant(BaseModel):
     intent: str
     latex_code: str
     summary: str
-    zone_id: Optional[str] = None
+    zone_id: str | None = None
 
 
 class RefinementProposal(BaseModel):
     original_context: str
-    proposals: List[ProposalVariant]
+    proposals: list[ProposalVariant]
 
 
 class AgentTurnResult(BaseModel):
     reply: str
     latex_code: str
-    zones_changed: List[str] = Field(default_factory=list)
-    resolved_zones: List[str] = Field(default_factory=list)
-    proposals: Optional[List[ProposalVariant]] = None
+    zones_changed: list[str] = Field(default_factory=list)
+    resolved_zones: list[str] = Field(default_factory=list)
+    proposals: list[ProposalVariant] | None = None
     provider: str
     model: str
-    tool_trace: List[Dict[str, Any]] = Field(default_factory=list)
+    tool_trace: list[dict[str, Any]] = Field(default_factory=list)
     route: str = ""
-    zone_document: Optional[Dict[str, Any]] = None
+    zone_document: dict[str, Any] | None = None
 
 
-def _sanitize_tex_json(obj: Any) -> Any:
-    """Restore TeX control sequences mangled by JSON decode.
-
-    JSON decoding converts ``\r`` to a carriage-return character, which
-    strips the ``r`` from macros like ``\resumeItem``.  We only repair
-    the specific known patterns rather than blindly escaping all control
-    characters, which would break ``\textbf``, ``\textit``, ``\texttt`` etc.
-
-    Specifically fixed:
-    - ``\r`` (CR) followed by a letter  → ``\\r`` (restores ``\resume*``)
-    - ``\\\\`` (double-double-backslash) → ``\\`` (de-duplicates over-escaped)
-    """
-    if isinstance(obj, str):
-        # Fix CR + letter → \r + letter (restores \resumeItem etc.)
-        obj = re.sub(r"\r([a-zA-Z])", r"\\r\1", obj)
-        # De-duplicate \\cmd → \cmd (over-escaped by some LLMs)
-        obj = re.sub(r"\\{2,}([a-zA-Z])", r"\\\1", obj)
-        return obj
-    elif isinstance(obj, dict):
-        return {k: _sanitize_tex_json(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [_sanitize_tex_json(x) for x in obj]
-    return obj
-
-
-def _extract_json(text: str) -> dict:
-    """Parse JSON from model output, tolerating markdown fences."""
-    text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    try:
-        return _sanitize_tex_json(json.loads(text))
-    except json.JSONDecodeError as e:
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            try:
-                return _sanitize_tex_json(json.loads(match.group(0)))
-            except json.JSONDecodeError as e2:
-                log.error("agent.error: json extract failed - %s", e2)
-                raise
-        log.error("agent.error: no json in model output - %s", e)
-        raise
+_extract_json = safe_extract_json
 
 
 class AIAgent:
@@ -136,13 +94,13 @@ class AIAgent:
         system: str,
         user: str,
         *,
-        provider: Optional[str],
-        model: Optional[str],
-        api_key: Optional[str] = None,
-        history: Optional[List[Dict[str, str]]] = None,
+        provider: str | None,
+        model: str | None,
+        api_key: str | None = None,
+        history: list[dict[str, str]] | None = None,
         temperature: float = 0.3,
-    ) -> Tuple[dict, str, str]:
-        messages: List[ChatMessage] = [ChatMessage(role="system", content=system)]
+    ) -> tuple[dict, str, str]:
+        messages: list[ChatMessage] = [ChatMessage(role="system", content=system)]
         if history:
             for h in history[-self.HISTORY_WINDOW :]:
                 role = h.get("role", "user")
@@ -168,9 +126,9 @@ class AIAgent:
         bio: str,
         template_latex: str,
         *,
-        provider: Optional[str] = None,
-        model: Optional[str] = None,
-        api_key: Optional[str] = None,
+        provider: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
     ) -> ResumeUpdate:
         """Fill resume by routing the bio to every zone specialist."""
         log.info(
@@ -197,11 +155,11 @@ class AIAgent:
         self,
         current_latex: str,
         command: str,
-        section_name: Optional[str] = None,
+        section_name: str | None = None,
         *,
-        provider: Optional[str] = None,
-        model: Optional[str] = None,
-        api_key: Optional[str] = None,
+        provider: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
     ) -> RefinementProposal:
         zones = zone_engine.list_zones(current_latex)
         target = section_name
@@ -266,9 +224,9 @@ class AIAgent:
         broken_latex: str,
         error_logs: str,
         *,
-        provider: Optional[str] = None,
-        model: Optional[str] = None,
-        api_key: Optional[str] = None,
+        provider: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
     ) -> ResumeUpdate:
         """Repair a broken LaTeX document using a line-indexed delta patch.
 
@@ -429,9 +387,9 @@ class AIAgent:
         self,
         latex_code: str,
         *,
-        provider: Optional[str] = None,
-        model: Optional[str] = None,
-        api_key: Optional[str] = None,
+        provider: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
     ) -> ResumeUpdate:
         system = (
             "Optimize LaTeX layout to fit more content (margins, spacing). "
@@ -461,7 +419,7 @@ class AIAgent:
         session: Any = None,
         latex_code: str = "",
         template_latex: str = "",
-        source_url: Optional[str] = None,
+        source_url: str | None = None,
     ) -> ZoneDocument:
         """Build or load ZoneDocument for a session / latex blob."""
         if session is not None:
@@ -477,14 +435,14 @@ class AIAgent:
         user_message: str,
         latex_code: str,
         template_latex: str,
-        history: List[Dict[str, Any]],
-        target_zone: Optional[str] = None,
-        provider: Optional[str] = None,
-        model: Optional[str] = None,
-        api_key: Optional[str] = None,
+        history: list[dict[str, Any]],
+        target_zone: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
         is_first_fill: bool = False,
         session: Any = None,
-        zone_document: Optional[ZoneDocument] = None,
+        zone_document: ZoneDocument | None = None,
     ) -> AgentTurnResult:
         """Top-level router → direct reply or orchestrator zone agents."""
         working = latex_code or template_latex

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from typing import Any, List, Optional, Type
+from typing import Any
+
 from pydantic import BaseModel
 
 from .base import ChatMessage, LLMProvider, LLMResponse
@@ -12,7 +13,7 @@ from .base import ChatMessage, LLMProvider, LLMResponse
 class OpenAIProvider(LLMProvider):
     name = "openai"
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: str | None = None):
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self._client: Any = None
 
@@ -35,11 +36,11 @@ class OpenAIProvider(LLMProvider):
 
     def chat(
         self,
-        messages: List[ChatMessage],
+        messages: list[ChatMessage],
         *,
         model: str,
         temperature: float = 0.4,
-        response_format: Optional[str] = None,
+        response_format: str | None = None,
     ) -> LLMResponse:
         kwargs = {
             "model": model,
@@ -67,8 +68,8 @@ class OpenAIProvider(LLMProvider):
 
     def chat_model(
         self,
-        messages: List[ChatMessage],
-        response_model: Type[BaseModel],
+        messages: list[ChatMessage],
+        response_model: type[BaseModel],
         *,
         model: str,
         temperature: float = 0.4,

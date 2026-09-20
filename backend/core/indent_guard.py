@@ -1,11 +1,10 @@
 import re
-from typing import Dict, Tuple
 
 
 class IndentGuard:
     """Validates and fixes LaTeX indentation and brace balance."""
 
-    def check_brace_balance(self, latex: str) -> Tuple[bool, str]:
+    def check_brace_balance(self, latex: str) -> tuple[bool, str]:
         """Checks if curly braces are balanced."""
         stack = []
         for i, char in enumerate(latex):
@@ -20,7 +19,7 @@ class IndentGuard:
             return False, f"Unclosed brace at index {stack[-1]}"
         return True, "Balanced"
 
-    def validate_indentation(self, latex: str) -> Dict[str, any]:
+    def validate_indentation(self, latex: str) -> dict[str, any]:
         """
         Validates indentation and basic syntax.
 

@@ -6,95 +6,92 @@ import asyncio
 import base64
 import traceback
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-
 try:
-    from core.compiler import compiler, CompilationError
+    from core import config
     from core.ai_agent import ai_agent
-    from core.templates import template_manager
-    from core.parser import sectional_parser
     from core.ats_scorer import ats_scorer
+    from core.auth_store import ProviderConfig, UserProfile, auth_store
+    from core.chat_stream import stream_chat_turn
+    from core.compiler import CompilationError, compiler
     from core.indent_guard import indent_guard
-    from core.refinement import refinement_manager, DraftVariant
-    from core.session_store import (
-        session_store,
-        take_snapshot,
-        rollback_to_snapshot,
-        push_turn_snapshot,
-        tag_turn_snapshot,
-        pop_turn_snapshot,
-        ChatSession,
-    )
-    from core.zones import zone_engine
-    from core.logging_setup import get_logger, setup_logging
-    from core.auth_store import auth_store, UserProfile, ProviderConfig
+    from core.latex_soften import soften_latex_for_tectonic
     from core.latex_to_zones import latex_to_zones
+    from core.logging_setup import get_logger, setup_logging
+    from core.orchestrator import orchestrator as _orchestrator
     from core.overleaf_import import (
-        import_overleaf_url,
-        OverleafImportError,
-        validate_overleaf_url,
         ImportResult,
+        OverleafImportError,
+        import_overleaf_url,
+        validate_overleaf_url,
     )
+    from core.parser import sectional_parser
+    from core.rate_limiter import chat_rate_limiter
+    from core.refinement import DraftVariant, refinement_manager
+    from core.session_store import (
+        ChatSession,
+        pop_turn_snapshot,
+        push_turn_snapshot,
+        rollback_to_snapshot,
+        session_store,
+        tag_turn_snapshot,
+        take_snapshot,
+    )
+    from core.templates import template_manager
+    from core.zone_agents import zone_agent_router as _zone_agent_router
     from core.zone_document import (
         ZoneDocument,
         document_from_session,
-        sync_session_from_document,
         ensure_full_document,
+        sync_session_from_document,
     )
-    from core.latex_soften import soften_latex_for_tectonic
-    from core import config
-    from core.rate_limiter import chat_rate_limiter
-    from core.chat_stream import stream_chat_turn
-    from core.orchestrator import orchestrator as _orchestrator
-    from core.zone_agents import zone_agent_router as _zone_agent_router
-    from llm_router import llm_router, SUPPORTED_PROVIDERS
+    from core.zones import zone_engine
+    from llm_router import SUPPORTED_PROVIDERS, llm_router
 except ImportError:
-    from .core.compiler import compiler, CompilationError
+    from .core import config
     from .core.ai_agent import ai_agent
-    from .core.templates import template_manager
-    from .core.parser import sectional_parser
     from .core.ats_scorer import ats_scorer
+    from .core.auth_store import ProviderConfig, UserProfile, auth_store
+    from .core.chat_stream import stream_chat_turn
+    from .core.compiler import CompilationError, compiler
     from .core.indent_guard import indent_guard
-    from .core.refinement import refinement_manager, DraftVariant
-    from .core.session_store import (
-        session_store,
-        take_snapshot,
-        rollback_to_snapshot,
-        push_turn_snapshot,
-        tag_turn_snapshot,
-        pop_turn_snapshot,
-        ChatSession,
-    )
-    from .core.zones import zone_engine
-    from .core.logging_setup import get_logger, setup_logging
-    from .core.auth_store import auth_store, UserProfile, ProviderConfig
-
+    from .core.latex_soften import soften_latex_for_tectonic
     from .core.latex_to_zones import latex_to_zones
+    from .core.logging_setup import get_logger, setup_logging
+    from .core.orchestrator import orchestrator as _orchestrator
     from .core.overleaf_import import (
-        import_overleaf_url,
-        OverleafImportError,
-        validate_overleaf_url,
         ImportResult,
+        OverleafImportError,
+        import_overleaf_url,
+        validate_overleaf_url,
     )
+    from .core.parser import sectional_parser
+    from .core.rate_limiter import chat_rate_limiter
+    from .core.refinement import DraftVariant, refinement_manager
+    from .core.session_store import (
+        ChatSession,
+        pop_turn_snapshot,
+        push_turn_snapshot,
+        rollback_to_snapshot,
+        session_store,
+        tag_turn_snapshot,
+    )
+    from .core.templates import template_manager
+    from .core.zone_agents import zone_agent_router as _zone_agent_router
     from .core.zone_document import (
         ZoneDocument,
         document_from_session,
-        sync_session_from_document,
         ensure_full_document,
+        sync_session_from_document,
     )
-    from .core.latex_soften import soften_latex_for_tectonic
-    from .core import config
-    from .core.rate_limiter import chat_rate_limiter
-    from .core.chat_stream import stream_chat_turn
-    from .core.orchestrator import orchestrator as _orchestrator
-    from .core.zone_agents import zone_agent_router as _zone_agent_router
-    from .llm_router import llm_router, SUPPORTED_PROVIDERS
+    from .core.zones import zone_engine
+    from .llm_router import SUPPORTED_PROVIDERS, llm_router
 
 setup_logging()
 log = get_logger("api")
@@ -122,7 +119,7 @@ except Exception as _fc_err:  # pragma: no cover
         log.warning("fontconfig: setup failed - %s", e)
 
 
-def _mask_key(key: Optional[str]) -> str:
+def _mask_key(key: str | None) -> str:
     if not key or not key.strip():
         return "(none)"
     k = key.strip()
@@ -203,98 +200,100 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 class GenerateRequest(BaseModel):
     bio: str
     template_name: str = "modern"
-    provider: Optional[str] = None
-    model: Optional[str] = None
-    api_key: Optional[str] = None
+    provider: str | None = None
+    model: str | None = None
+    api_key: str | None = None
 
 
 class ProposalRequest(BaseModel):
     current_latex: str
     command: str
-    section_name: Optional[str] = None
-    provider: Optional[str] = None
-    model: Optional[str] = None
-    api_key: Optional[str] = None
+    section_name: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    api_key: str | None = None
 
 
 class ApplyRequest(BaseModel):
     session_id: str
     variant_id: str
     current_latex: str
-    section_name: Optional[str] = None
-    provider: Optional[str] = None
-    model: Optional[str] = None
-    api_key: Optional[str] = None
+    section_name: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    api_key: str | None = None
 
 
 class ScoreRequest(BaseModel):
     resume_text: str
     job_description: str
-    provider: Optional[str] = None
-    model: Optional[str] = None
-    api_key: Optional[str] = None
+    provider: str | None = None
+    model: str | None = None
+    api_key: str | None = None
 
 
 class CompileRequest(BaseModel):
     latex_code: str
-    project_dir: Optional[str] = None
-    session_id: Optional[str] = None
+    project_dir: str | None = None
+    session_id: str | None = None
 
 
 class CreateSessionRequest(BaseModel):
     template_name: str = "starter"
-    title: Optional[str] = None
-    provider: Optional[str] = None
-    model: Optional[str] = None
-    source_url: Optional[str] = None
-    latex: Optional[str] = None
+    document_mode: Literal["resume", "research_paper"] = "resume"
+    title: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    source_url: str | None = None
+    latex: str | None = None
     # Optional zone filter (zone-selection path, kept for back-compat)
-    included_zone_nos: Optional[List[int]] = None
-    zone_order: Optional[List[int]] = None
-    custom_zones: Optional[List[str]] = None
+    included_zone_nos: list[int] | None = None
+    zone_order: list[int] | None = None
+    custom_zones: list[str] | None = None
 
 
 class SetupImportRequest(BaseModel):
-    url: Optional[str] = None
-    latex: Optional[str] = None
-    template_name: Optional[str] = None
+    url: str | None = None
+    latex: str | None = None
+    template_name: str | None = None
+    document_mode: Literal["resume", "research_paper"] = "resume"
 
 
 class SessionSetupRequest(BaseModel):
-    included_zone_nos: Optional[List[int]] = None
-    zone_order: Optional[List[int]] = None
-    source_url: Optional[str] = None
-    latex: Optional[str] = None
+    included_zone_nos: list[int] | None = None
+    zone_order: list[int] | None = None
+    source_url: str | None = None
+    latex: str | None = None
 
 
 class AddZoneRequest(BaseModel):
     description: str = "Custom section"
-    after_zone_no: Optional[int] = None
+    after_zone_no: int | None = None
     at_start: bool = False
-    latex_inner: Optional[str] = None
+    latex_inner: str | None = None
 
 
 class ZoneOrderRequest(BaseModel):
-    zone_order: List[int]
+    zone_order: list[int]
 
 
 class ChatRequest(BaseModel):
     session_id: str
     message: str
-    target_zone: Optional[str] = Field(
+    target_zone: str | None = Field(
         default="auto",
         description="Target zone identifier (e.g. 'auto', 'HEADER', 'SKILLS', etc.)",
     )
-    provider: Optional[str] = None
-    model: Optional[str] = None
-    template_name: Optional[str] = None
-    api_key: Optional[str] = None
+    provider: str | None = None
+    model: str | None = None
+    template_name: str | None = None
+    api_key: str | None = None
 
 
 class ModelPatchRequest(BaseModel):
     provider: str
     model: str
-    api_key: Optional[str] = None
+    api_key: str | None = None
 
 
 class LatexPutRequest(BaseModel):
@@ -305,23 +304,23 @@ class ApplyChatProposalRequest(BaseModel):
     session_id: str
     proposal_session_id: str
     variant_id: str
-    provider: Optional[str] = None
-    model: Optional[str] = None
-    api_key: Optional[str] = None
+    provider: str | None = None
+    model: str | None = None
+    api_key: str | None = None
 
 
 # ---------- Helpers ----------
 
 
 def _resolve_llm(
-    provider: Optional[str], model: Optional[str], session=None
+    provider: str | None, model: str | None, session=None
 ):
     p = provider or (session.active_provider if session else None) or config.LLM_PROVIDER
     m = model or (session.active_model if session else None) or config.MODEL_NAME
     return p, m
 
 
-def _token_from_header(authorization: Optional[str]) -> Optional[str]:
+def _token_from_header(authorization: str | None) -> str | None:
     if not authorization or not isinstance(authorization, str):
         return None
     parts = authorization.strip().split()
@@ -333,9 +332,9 @@ def _token_from_header(authorization: Optional[str]) -> Optional[str]:
 def _resolve_api_key(
     *,
     provider: str,
-    request_key: Optional[str],
-    authorization: Optional[str] = None,
-) -> Optional[str]:
+    request_key: str | None,
+    authorization: str | None = None,
+) -> str | None:
     """Prefer request api_key, then logged-in profile key."""
     if request_key and request_key.strip():
         return request_key.strip()
@@ -352,8 +351,8 @@ def _resolve_api_key(
 
 def _resolve_provider_config(
     provider: str,
-    user: Optional[UserProfile],
-) -> Optional[ProviderConfig]:
+    user: UserProfile | None,
+) -> ProviderConfig | None:
     """Return the user's stored ProviderConfig for the given provider.
 
     Returns None when no config exists (caller falls back to env vars).
@@ -362,8 +361,8 @@ def _resolve_provider_config(
 
 
 def _get_current_user(
-    authorization: Optional[str], *, required: bool = False
-) -> Optional[UserProfile]:
+    authorization: str | None, *, required: bool = False
+) -> UserProfile | None:
     token = _token_from_header(authorization)
     user = auth_store.user_from_token(token)
     if required and not user:
@@ -375,7 +374,7 @@ def _get_current_user(
 
 
 def _check_session_access(
-    session: ChatSession, user: Optional[UserProfile]
+    session: ChatSession, user: UserProfile | None
 ) -> None:
     if config.REQUIRE_AUTH_FOR_SESSIONS:
         if not user:
@@ -408,10 +407,10 @@ class LoginRequest(BaseModel):
 
 
 class ProfileKeysRequest(BaseModel):
-    api_keys: Dict[str, str] = Field(default_factory=dict)
-    clear_keys: List[str] = Field(default_factory=list)
-    default_provider: Optional[str] = None
-    default_model: Optional[str] = None
+    api_keys: dict[str, str] = Field(default_factory=dict)
+    clear_keys: list[str] = Field(default_factory=list)
+    default_provider: str | None = None
+    default_model: str | None = None
 
 
 class ChangePasswordRequest(BaseModel):
@@ -422,27 +421,27 @@ class ChangePasswordRequest(BaseModel):
 class ProviderConfigRequest(BaseModel):
     """All possible credential fields — only relevant ones need to be set."""
     # Simple key providers
-    api_key: Optional[str] = None
-    model: Optional[str] = None
+    api_key: str | None = None
+    model: str | None = None
     # Azure OpenAI
-    endpoint: Optional[str] = None
-    deployment: Optional[str] = None
-    api_version: Optional[str] = None
+    endpoint: str | None = None
+    deployment: str | None = None
+    api_version: str | None = None
     # AWS Bedrock
-    access_key_id: Optional[str] = None
-    secret_access_key: Optional[str] = None
-    region: Optional[str] = None
-    model_id: Optional[str] = None
+    access_key_id: str | None = None
+    secret_access_key: str | None = None
+    region: str | None = None
+    model_id: str | None = None
 
 
 async def compile_with_retry(
     latex_code: str,
     max_retries: int = 2,
     *,
-    provider: Optional[str] = None,
-    model: Optional[str] = None,
-    api_key: Optional[str] = None,
-    project_dir: Optional[str] = None,
+    provider: str | None = None,
+    model: str | None = None,
+    api_key: str | None = None,
+    project_dir: str | None = None,
 ) -> tuple:
     """Compile LaTeX; on failure ask the agent to fix. Returns (pdf_bytes, latex)."""
     current_latex = ensure_full_document(latex_code or "")
@@ -572,7 +571,7 @@ async def login(req: LoginRequest):
 
 
 @app.post("/auth/logout")
-async def logout(authorization: Optional[str] = Header(default=None)):
+async def logout(authorization: str | None = Header(default=None)):
     token = _token_from_header(authorization)
     if token:
         auth_store.revoke_token(token)
@@ -581,7 +580,7 @@ async def logout(authorization: Optional[str] = Header(default=None)):
 
 
 @app.get("/auth/me")
-async def auth_me(authorization: Optional[str] = Header(default=None)):
+async def auth_me(authorization: str | None = Header(default=None)):
     user = auth_store.user_from_token(_token_from_header(authorization))
     if not user:
         raise HTTPException(status_code=401, detail="Not logged in")
@@ -591,7 +590,7 @@ async def auth_me(authorization: Optional[str] = Header(default=None)):
 @app.put("/auth/profile/keys")
 async def save_profile_keys(
     req: ProfileKeysRequest,
-    authorization: Optional[str] = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     user = auth_store.user_from_token(_token_from_header(authorization))
     if not user:
@@ -620,7 +619,7 @@ async def save_profile_keys(
 @app.post("/auth/profile/password")
 async def change_password(
     req: ChangePasswordRequest,
-    authorization: Optional[str] = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     user = auth_store.user_from_token(_token_from_header(authorization))
     if not user:
@@ -640,7 +639,7 @@ async def change_password(
 
 @app.get("/auth/profile/providers")
 async def list_provider_configs(
-    authorization: Optional[str] = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     """List configured providers with status/hint — never raw secrets."""
     user = auth_store.user_from_token(_token_from_header(authorization))
@@ -674,7 +673,7 @@ async def list_provider_configs(
 async def save_provider_config(
     provider: str,
     req: ProviderConfigRequest,
-    authorization: Optional[str] = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     """Save credentials for one provider. Raw secrets are encrypted at rest.
     Response never includes raw secrets — only configured status and hint.
@@ -692,7 +691,7 @@ async def save_provider_config(
     # Load existing config so we only update provided fields
     existing = auth_store.get_provider_config(user, p) or ProviderConfig()
 
-    def _set(field: str, value: Optional[str]) -> None:
+    def _set(field: str, value: str | None) -> None:
         if value is not None:
             stripped = value.strip()
             if stripped:
@@ -732,7 +731,7 @@ async def save_provider_config(
 @app.delete("/auth/profile/providers/{provider}")
 async def delete_provider_config(
     provider: str,
-    authorization: Optional[str] = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     """Clear all stored credentials for one provider."""
     user = auth_store.user_from_token(_token_from_header(authorization))
@@ -750,7 +749,7 @@ async def delete_provider_config(
 @app.post("/compile")
 async def compile_latex_direct(
     req: CompileRequest,
-    authorization: Optional[str] = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     log.info(
         "compile.step: request session=%s raw_chars=%s",
@@ -957,7 +956,7 @@ async def apply_edit(req: ApplyRequest):
 @app.post("/score")
 async def score_resume(
     req: ScoreRequest,
-    authorization: Optional[str] = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     provider, model = _resolve_llm(req.provider, req.model)
     api_key = _resolve_api_key(
@@ -1032,7 +1031,7 @@ async def get_sections(req: dict):
 @app.post("/squeeze")
 async def squeeze_resume(
     req: dict,
-    authorization: Optional[str] = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     try:
         latex = req.get("latex_code", "")
@@ -1097,10 +1096,10 @@ def _tectonic_crash_tip(logs: str) -> str:
 
 def _doc_from_import(
     *,
-    url: Optional[str] = None,
-    latex: Optional[str] = None,
-    template_name: Optional[str] = None,
-) -> Tuple[ZoneDocument, Optional[str], List[str], List[str]]:
+    url: str | None = None,
+    latex: str | None = None,
+    template_name: str | None = None,
+) -> tuple[ZoneDocument, str | None, list[str], list[str]]:
     """
     Returns (document, project_dir, warnings, compat_notes).
     project_dir is set when an Overleaf/GitHub zip with assets was downloaded.
@@ -1113,9 +1112,9 @@ def _doc_from_import(
         template_name,
     )
     source_url = url
-    project_dir: Optional[str] = None
-    warnings: List[str] = []
-    compat_notes: List[str] = []
+    project_dir: str | None = None
+    warnings: list[str] = []
+    compat_notes: list[str] = []
     if url and not latex:
         try:
             log.info("import.step: validate+download overleaf url")
@@ -1167,20 +1166,77 @@ def _doc_from_import(
     return doc, project_dir, warnings, compat_notes
 
 
+@app.get("/templates")
+async def get_available_templates() -> dict[str, Any]:
+    """Return available LaTeX templates categorized by document mode."""
+    return {
+        "resume": [
+            {
+                "id": "starter",
+                "name": "ATS-Ready Resume (Default)",
+                "description": (
+                    "Clean, ATS-compliant single-page resume based on "
+                    "resume.cls"
+                ),
+            }
+        ],
+        "research_paper": [
+            {
+                "id": "paper_starter",
+                "name": "Standard Two-Column",
+                "description": (
+                    "Two-column academic article with math, algorithms, "
+                    "and booktabs"
+                ),
+            },
+            {
+                "id": "ieee_starter",
+                "name": "IEEE Conference / Transactions",
+                "description": (
+                    "IEEE format with index terms, author blocks, "
+                    "and numbered citations"
+                ),
+            },
+            {
+                "id": "acm_starter",
+                "name": "ACM SIGCONF",
+                "description": (
+                    "ACM conference format with CCS concepts and "
+                    "author affiliations"
+                ),
+            },
+            {
+                "id": "arxiv_starter",
+                "name": "arXiv / NeurIPS Preprint",
+                "description": (
+                    "Single-column preprint format with generous margins "
+                    "and appendix"
+                ),
+            },
+        ],
+    }
+
+
 @app.post("/setup/import")
 async def setup_import(req: SetupImportRequest):
     """Convert Overleaf URL / pasted LaTeX / bundled template → zones JSON."""
     log.info(
-        "setup.import: url=%s latex=%s template=%s",
+        "setup.import: url=%s latex=%s template=%s mode=%s",
         bool(req.url),
         bool(req.latex),
         req.template_name,
+        req.document_mode,
+    )
+    tpl_default = (
+        "paper_starter"
+        if req.document_mode == "research_paper"
+        else "starter"
     )
     doc, project_dir, warnings, compat_notes = _doc_from_import(
         url=req.url,
         latex=req.latex,
         template_name=req.template_name or (
-            "starter" if not req.url and not req.latex else None
+            tpl_default if not req.url and not req.latex else None
         ),
     )
     # Soft compile check so UI knows if format can render
@@ -1230,7 +1286,7 @@ async def setup_import(req: SetupImportRequest):
 @app.post("/sessions")
 async def create_session(
     req: CreateSessionRequest,
-    authorization: Optional[str] = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     """
     Create a chat base from either:
@@ -1247,7 +1303,7 @@ async def create_session(
 
     has_url = bool((req.source_url or "").strip())
     has_latex = bool((req.latex or "").strip())
-    project_dir: Optional[str] = None
+    project_dir: str | None = None
     log.info(
         "session.create: url=%s latex=%s template=%s included=%s user=%s",
         has_url,
@@ -1256,24 +1312,37 @@ async def create_session(
         req.included_zone_nos,
         username or "anonymous",
     )
-    compat_notes: List[str] = []
+    compat_notes: list[str] = []
     if has_url or has_latex:
         doc, project_dir, _warnings, compat_notes = _doc_from_import(
             url=req.source_url, latex=req.latex
         )
     else:
-        # No URL/paste — use the starter template (resume.cls-based)
-        tpl_name = req.template_name or "starter"
+        doc_mode = req.document_mode or "resume"
+        if req.template_name and req.template_name != "starter":
+            tpl_name = req.template_name
+        elif doc_mode == "research_paper":
+            tpl_name = "paper_starter"
+        else:
+            tpl_name = "starter"
+
         template = template_manager.get_template(tpl_name)
         if not template:
-            # Graceful fallback: try starter, then hard error
-            template = template_manager.get_template("starter")
+            fallback_tpl = (
+                "paper_starter" if doc_mode == "research_paper" else "starter"
+            )
+            template = template_manager.get_template(fallback_tpl)
         if not template:
             log.error("session.create: template not found %s", tpl_name)
             raise HTTPException(status_code=404, detail="Template not found")
         soft, compat_notes = soften_latex_for_tectonic(template)
         doc = latex_to_zones(soft)
-        log.info("session.create: bundled template=%s zones=%s", tpl_name, doc.zone_order)
+        log.info(
+            "session.create: bundled template=%s mode=%s zones=%s",
+            tpl_name,
+            doc_mode,
+            doc.zone_order,
+        )
 
     if req.source_url and not doc.source_url:
         doc.source_url = req.source_url
@@ -1309,10 +1378,32 @@ async def create_session(
             doc = latex_to_zones(assembled, source_url=doc.source_url)
         except Exception:
             pass
+
+    doc_mode = req.document_mode or "resume"
+    chosen_tpl = (
+        tpl_name
+        if not (has_url or has_latex)
+        else (req.template_name or "starter")
+    )
+    default_title = (
+        "New research paper chat"
+        if doc_mode == "research_paper"
+        else "New resume chat"
+    )
+    default_welcome = (
+        "Paper base ready. Ask me to refine sections, draft methodology, "
+        "add citations, or edit mathematical formulations."
+        if doc_mode == "research_paper"
+        else (
+            "Base ready. Paste your biodata to fill zones, or ask to "
+            "add/remove/reorder/edit a zone."
+        )
+    )
     session = session_store.create(
         username=username,
-        template_name=req.template_name or "starter",
-        title=req.title or "New resume chat",
+        template_name=chosen_tpl,
+        document_mode=doc_mode,
+        title=req.title or default_title,
         latex_code=assembled,
         provider=provider,
         model=model,
@@ -1322,16 +1413,9 @@ async def create_session(
         zone_order=list(doc.zone_order),
         next_zone_no=doc.next_zone_no,
         source_url=doc.source_url,
-        # project_dir is intentionally omitted here — session_store.create()
-        # will create a fresh workspace, seed resume.cls, and set project_dir
-        # to that workspace automatically. If an Overleaf import provided a
-        # separate project_dir, its files are copied into the workspace too.
         project_dir=project_dir,
         setup_complete=True,
-        welcome=(
-            "Base ready. Paste your biodata to fill zones, or ask to "
-            "add/remove/reorder/edit a zone."
-        ),
+        welcome=default_welcome,
     )
     log.info(
         "session.create: ok id=%s zones=%s project_dir=%s compat=%s",
@@ -1353,7 +1437,7 @@ async def create_session(
 async def confirm_session_setup(
     session_id: str,
     req: SessionSetupRequest,
-    authorization: Optional[str] = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     session = session_store.get(session_id)
     if not session:
@@ -1405,7 +1489,7 @@ async def confirm_session_setup(
 async def add_session_zone(
     session_id: str,
     req: AddZoneRequest,
-    authorization: Optional[str] = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     session = session_store.get(session_id)
     if not session:
@@ -1451,7 +1535,7 @@ async def add_session_zone(
 async def remove_session_zone(
     session_id: str,
     zone_no: int,
-    authorization: Optional[str] = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     session = session_store.get(session_id)
     if not session:
@@ -1489,7 +1573,7 @@ async def remove_session_zone(
 async def patch_zone_order(
     session_id: str,
     req: ZoneOrderRequest,
-    authorization: Optional[str] = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     session = session_store.get(session_id)
     if not session:
@@ -1522,7 +1606,7 @@ async def patch_zone_order(
 
 @app.get("/sessions")
 async def list_sessions(
-    authorization: Optional[str] = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     user = _get_current_user(
         authorization, required=config.REQUIRE_AUTH_FOR_SESSIONS
@@ -1534,7 +1618,7 @@ async def list_sessions(
 @app.get("/sessions/{session_id}")
 async def get_session(
     session_id: str,
-    authorization: Optional[str] = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     session = session_store.get(session_id)
     if not session:
@@ -1549,7 +1633,7 @@ async def get_session(
 @app.delete("/sessions/{session_id}")
 async def delete_session(
     session_id: str,
-    authorization: Optional[str] = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     session = session_store.get(session_id)
     if not session:
@@ -1567,7 +1651,7 @@ async def delete_session(
 async def patch_session_model(
     session_id: str,
     req: ModelPatchRequest,
-    authorization: Optional[str] = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     session = session_store.get(session_id)
     if not session:
@@ -1598,7 +1682,7 @@ async def patch_session_model(
 async def put_session_latex(
     session_id: str,
     req: LatexPutRequest,
-    authorization: Optional[str] = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     session = session_store.get(session_id)
     if not session:
@@ -1646,7 +1730,7 @@ async def put_session_latex(
 async def chat(
     req: ChatRequest,
     request: Request,
-    authorization: Optional[str] = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     session = session_store.get(req.session_id)
     if not session:
@@ -1852,7 +1936,7 @@ async def chat(
             "variants": [v.model_dump() for v in result.proposals],
         }
 
-    meta: Dict[str, Any] = {
+    meta: dict[str, Any] = {
         "zones_changed": result.zones_changed,
         "resolved_zones": result.resolved_zones,
         "tool_trace": result.tool_trace,
@@ -1911,10 +1995,10 @@ async def chat_stream(
     message: str,
     request: Request,
     target_zone: str = "auto",
-    provider: Optional[str] = None,
-    model: Optional[str] = None,
-    template_name: Optional[str] = None,
-    authorization: Optional[str] = None,  # passed as query param for EventSource
+    provider: str | None = None,
+    model: str | None = None,
+    template_name: str | None = None,
+    authorization: str | None = None,  # passed as query param for EventSource
 ):
     """SSE endpoint for streaming per-zone progress during a chat turn.
 
@@ -1999,7 +2083,7 @@ async def chat_stream(
     # Captures current session/message state into closure for finalize_fn
     _session_id_ref = session_id
 
-    async def _finalize(orch_result) -> Dict[str, Any]:
+    async def _finalize(orch_result) -> dict[str, Any]:
         """Compile, save session, build response — mirrors POST /chat logic."""
         sess = session_store.get(_session_id_ref)
         pdf_b64 = None
@@ -2110,8 +2194,8 @@ async def chat_stream(
 @app.post("/sessions/{session_id}/undo")
 async def undo_last_turn(
     session_id: str,
-    authorization: Optional[str] = Header(default=None),
-) -> Dict[str, Any]:
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
     """Pop the last undo snapshot, restore LaTeX + zones, and recompile."""
     session = session_store.get(session_id)
     if not session:
@@ -2130,8 +2214,8 @@ async def undo_last_turn(
 
     session = session_store.get(session_id) or session
 
-    pdf_b64: Optional[str] = None
-    compile_err: Optional[str] = None
+    pdf_b64: str | None = None
+    compile_err: str | None = None
     if session.latex_code:
         try:
             async with compile_semaphore:
@@ -2162,7 +2246,7 @@ async def undo_last_turn(
 @app.post("/chat/apply")
 async def chat_apply_proposal(
     req: ApplyChatProposalRequest,
-    authorization: Optional[str] = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     session = session_store.get(req.session_id)
     if not session:
@@ -2280,6 +2364,7 @@ async def chat_apply_proposal(
 
 if __name__ == "__main__":
     import os
+
     import uvicorn
 
     port = int(os.getenv("PORT", "8001"))

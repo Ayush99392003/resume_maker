@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Type
+from typing import Any
+
 from pydantic import BaseModel
 
 
@@ -20,7 +21,7 @@ class LLMResponse:
     provider: str
     model: str
     raw: Any = None
-    usage: Dict[str, Any] = field(default_factory=dict)
+    usage: dict[str, Any] = field(default_factory=dict)
 
 
 class LLMProvider(ABC):
@@ -31,11 +32,11 @@ class LLMProvider(ABC):
     @abstractmethod
     def chat(
         self,
-        messages: List[ChatMessage],
+        messages: list[ChatMessage],
         *,
         model: str,
         temperature: float = 0.4,
-        response_format: Optional[str] = None,
+        response_format: str | None = None,
     ) -> LLMResponse:
         """Send a chat completion request.
 
@@ -46,8 +47,8 @@ class LLMProvider(ABC):
     @abstractmethod
     def chat_model(
         self,
-        messages: List[ChatMessage],
-        response_model: Type[BaseModel],
+        messages: list[ChatMessage],
+        response_model: type[BaseModel],
         *,
         model: str,
         temperature: float = 0.4,

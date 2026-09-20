@@ -5,11 +5,11 @@ BACKEND = Path(__file__).resolve().parents[1] / "backend"
 sys.path.insert(0, str(BACKEND))
 
 from core.line_indexer import (
+    _context_window,
+    _error_line_numbers,
+    build_debug_payload,
     build_line_index,
     zone_line_range,
-    build_debug_payload,
-    _error_line_numbers,
-    _context_window,
 )
 
 # ---------------------------------------------------------------------------

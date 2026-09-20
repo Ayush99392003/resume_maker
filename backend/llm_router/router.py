@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import os
+
 from pydantic import BaseModel
-from typing import Dict, List, Optional, Type
 
 from .anthropic_provider import AnthropicProvider
 from .aws import AWSProvider
@@ -32,7 +32,7 @@ class LLMRouter:
         self._prompt_tokens = 0
         self._completion_tokens = 0
 
-    def get_metrics(self) -> Dict[str, int]:
+    def get_metrics(self) -> dict[str, int]:
         """Return cumulative call count and token usage dict."""
         return {
             "call_count": self._call_count,
@@ -41,7 +41,7 @@ class LLMRouter:
             "total_tokens": self._prompt_tokens + self._completion_tokens,
         }
 
-    def reset_metrics(self) -> Dict[str, int]:
+    def reset_metrics(self) -> dict[str, int]:
         """Reset and return previous token and call count metrics."""
         prev = self.get_metrics()
         self._call_count = 0
@@ -57,9 +57,9 @@ class LLMRouter:
 
     def make_provider(
         self,
-        name: Optional[str] = None,
+        name: str | None = None,
         *,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
     ) -> LLMProvider:
         """Build a provider instance; request api_key overrides env."""
         provider_name = (name or self.default_provider()).strip().lower()
@@ -85,7 +85,7 @@ class LLMRouter:
     def make_provider_from_config(
         self,
         provider: str,
-        cfg: "ProviderConfig",  # type: ignore[name-defined]
+        cfg: ProviderConfig,  # type: ignore[name-defined]
     ) -> LLMProvider:
         """Build a fully-configured provider from a ProviderConfig object.
 
@@ -114,9 +114,9 @@ class LLMRouter:
 
     def get_provider(
         self,
-        name: Optional[str] = None,
+        name: str | None = None,
         *,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
     ) -> LLMProvider:
         provider = self.make_provider(name, api_key=api_key)
         provider.ensure_configured()
@@ -124,13 +124,13 @@ class LLMRouter:
 
     def chat(
         self,
-        messages: List[ChatMessage],
+        messages: list[ChatMessage],
         *,
-        provider: Optional[str] = None,
-        model: Optional[str] = None,
-        api_key: Optional[str] = None,
+        provider: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
         temperature: float = 0.4,
-        response_format: Optional[str] = None,
+        response_format: str | None = None,
     ) -> LLMResponse:
         prov = self.get_provider(provider, api_key=api_key)
         model_name = (model or self.default_model()).strip()
@@ -150,12 +150,12 @@ class LLMRouter:
 
     def chat_model(
         self,
-        messages: List[ChatMessage],
-        response_model: Type[BaseModel],
+        messages: list[ChatMessage],
+        response_model: type[BaseModel],
         *,
-        provider: Optional[str] = None,
-        model: Optional[str] = None,
-        api_key: Optional[str] = None,
+        provider: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
         temperature: float = 0.4,
     ) -> BaseModel:
         prov = self.get_provider(provider, api_key=api_key)
@@ -169,7 +169,7 @@ class LLMRouter:
             temperature=temperature,
         )
 
-    def list_configured(self) -> Dict[str, bool]:
+    def list_configured(self) -> dict[str, bool]:
         """Return which providers have credentials available (best-effort)."""
         checks = {
             "openai": bool(os.getenv("OPENAI_API_KEY")),

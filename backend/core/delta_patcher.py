@@ -31,7 +31,6 @@ patch_latex(latex, delta)          -> str
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Tuple
 
 try:
     from core.logging_setup import get_logger
@@ -45,7 +44,7 @@ log = get_logger("delta_patcher")
 _RANGE_RE = re.compile(r"^(\d+)(?:-(\d+))?$")
 
 
-def _parse_key(key: str) -> Tuple[int, int]:
+def _parse_key(key: str) -> tuple[int, int]:
     """Parse a delta key like ``'164'`` or ``'163-166'`` into (start, end).
 
     Args:
@@ -66,8 +65,8 @@ def _parse_key(key: str) -> Tuple[int, int]:
 
 
 def apply_line_delta(
-    lines: List[str], delta: Dict[str, str]
-) -> List[str]:
+    lines: list[str], delta: dict[str, str]
+) -> list[str]:
     """Apply a fixer-agent line delta to a list of LaTeX source lines.
 
     Ranges are applied from bottom to top so that earlier replacements do not
@@ -82,7 +81,7 @@ def apply_line_delta(
         New list of lines with all delta patches applied.
     """
     # Parse all ranges first and sort descending so splicing is safe
-    parsed: List[Tuple[int, int, str]] = []
+    parsed: list[tuple[int, int, str]] = []
     for key, replacement in delta.items():
         try:
             start, end = _parse_key(key)
@@ -121,7 +120,7 @@ def apply_line_delta(
     return result
 
 
-def patch_latex(latex: str, delta: Dict[str, str]) -> str:
+def patch_latex(latex: str, delta: dict[str, str]) -> str:
     """Apply a line delta to a full LaTeX source string.
 
     This is a convenience wrapper around :func:`apply_line_delta` that splits,

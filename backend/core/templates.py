@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import Dict, List
 
 
 class TemplateManager:
@@ -8,7 +7,7 @@ class TemplateManager:
     def __init__(self, templates_dir: str = "templates"):
         # Get the absolute path to the templates directory
         self.base_dir = Path(__file__).parent.parent / templates_dir
-        self.templates: Dict[str, str] = {}
+        self.templates: dict[str, str] = {}
         self._load_templates()
 
     def _load_templates(self):
@@ -21,7 +20,7 @@ class TemplateManager:
             with open(tex_file, "r", encoding="utf-8") as f:
                 self.templates[tex_file.stem] = f.read()
 
-    def list_templates(self) -> List[str]:
+    def list_templates(self) -> list[str]:
         """Returns a list of available template names."""
         return list(self.templates.keys())
 
@@ -29,7 +28,7 @@ class TemplateManager:
         """Returns the raw content of a template by name."""
         return self.templates.get(name, "")
 
-    def fill_template(self, name: str, data: Dict[str, str]) -> str:
+    def fill_template(self, name: str, data: dict[str, str]) -> str:
         """
         Replaces placeholders in the format [[KEY]] with values from data.
 

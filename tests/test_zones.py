@@ -1,13 +1,12 @@
 """Unit tests for dynamic zone engine."""
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parents[1] / "backend"
 sys.path.insert(0, str(BACKEND))
 
-from core.zones import zone_engine  # noqa: E402
-
+from core.zones import zone_engine
 
 SAMPLE = r"""
 \documentclass{article}

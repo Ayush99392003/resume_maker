@@ -10,10 +10,9 @@ import secrets
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field
-
 
 # ---------------------------------------------------------------------------
 # Utilities
@@ -42,7 +41,7 @@ def _hash_password(password: str, salt: str) -> str:
 def _atomic_write_text(path: Path, content: str) -> None:
     """Write text atomically via temporary file, with fallback for FUSE."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path: Optional[Path] = None
+    temp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -104,14 +103,14 @@ def _get_fernet():
     return Fernet(_derive_fernet_key(secret))
 
 
-def _encrypt_config(cfg: "ProviderConfig") -> str:
+def _encrypt_config(cfg: ProviderConfig) -> str:
     """Return an encrypted, base64-safe token for a ProviderConfig."""
     f = _get_fernet()
     payload = cfg.model_dump_json().encode("utf-8")
     return f.encrypt(payload).decode("ascii")
 
 
-def _decrypt_config(token: str) -> Optional[Dict[str, Any]]:
+def _decrypt_config(token: str) -> dict[str, Any] | None:
     """Decrypt a stored provider config token; returns None on any failure."""
     if not token:
         return None
@@ -168,10 +167,10 @@ class ProviderConfig(BaseModel):
             return "***"
         return f"{key[:4]}...{key[-4:]}"
 
-    def fields_set_names(self, provider: str) -> List[str]:
+    def fields_set_names(self, provider: str) -> list[str]:
         """Return names of fields that are non-empty for this provider."""
         p = provider.strip().lower()
-        candidates: Dict[str, str] = {}
+        candidates: dict[str, str] = {}
         if p in ("openai", "groq", "gemini", "anthropic"):
             candidates = {"api_key": self.api_key, "model": self.model}
         elif p == "azure":
@@ -204,16 +203,16 @@ class UserProfile(BaseModel):
     default_provider: str = "groq"
     default_model: str = "openai/gpt-oss-120b"
     # provider name → encrypted ProviderConfig blob
-    provider_configs: Dict[str, str] = Field(default_factory=dict)
+    provider_configs: dict[str, str] = Field(default_factory=dict)
     # Legacy field kept for migration only — no longer written for new data
-    api_keys: Dict[str, str] = Field(default_factory=dict)
+    api_keys: dict[str, str] = Field(default_factory=dict)
     created_at: str = Field(default_factory=_utcnow)
     updated_at: str = Field(default_factory=_utcnow)
 
-    def public_dict(self) -> Dict[str, Any]:
+    def public_dict(self) -> dict[str, Any]:
         """Never expose raw secrets or password hash to the client."""
-        configured: Dict[str, bool] = {}
-        hints: Dict[str, str] = {}
+        configured: dict[str, bool] = {}
+        hints: dict[str, str] = {}
         for p in ("groq", "openai", "gemini", "anthropic", "azure", "aws"):
             cfg = _decrypt_config(self.provider_configs.get(p, ""))
             if cfg:
@@ -240,7 +239,7 @@ class UserProfile(BaseModel):
 
 
 class AuthStore:
-    def __init__(self, base_dir: Optional[Path] = None):
+    def __init__(self, base_dir: Path | None = None):
         if base_dir is None:
             base_dir = (
                 Path(__file__).resolve().parent.parent / "data" / "profiles"
@@ -248,12 +247,12 @@ class AuthStore:
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.tokens_path = self.base_dir.parent / "tokens.json"
-        self._tokens: Dict[str, str] = self._load_tokens()
+        self._tokens: dict[str, str] = self._load_tokens()
 
     def _profile_path(self, username: str) -> Path:
         return self.base_dir / f"{_norm_username(username)}.json"
 
-    def _load_tokens(self) -> Dict[str, str]:
+    def _load_tokens(self) -> dict[str, str]:
         if not self.tokens_path.exists():
             return {}
         try:
@@ -291,7 +290,7 @@ class AuthStore:
     # CRUD
     # ------------------------------------------------------------------
 
-    def get_user(self, username: str) -> Optional[UserProfile]:
+    def get_user(self, username: str) -> UserProfile | None:
         path = self._profile_path(username)
         if not path.exists():
             return None
@@ -368,7 +367,7 @@ class AuthStore:
             del self._tokens[token]
             self._save_tokens()
 
-    def user_from_token(self, token: Optional[str]) -> Optional[UserProfile]:
+    def user_from_token(self, token: str | None) -> UserProfile | None:
         if not token:
             return None
         self._tokens = self._load_tokens()
@@ -394,9 +393,9 @@ class AuthStore:
 
     def get_provider_config(
         self,
-        user: Optional[UserProfile],
+        user: UserProfile | None,
         provider: str,
-    ) -> Optional[ProviderConfig]:
+    ) -> ProviderConfig | None:
         """Decrypt and return a ProviderConfig, or None if not configured."""
         if not user:
             return None
@@ -425,9 +424,9 @@ class AuthStore:
     def set_api_keys(
         self,
         user: UserProfile,
-        keys: Dict[str, str],
+        keys: dict[str, str],
         *,
-        clear: Optional[List[str]] = None,
+        clear: list[str] | None = None,
     ) -> UserProfile:
         """Update simple api_key field via the new encrypted store.
 
@@ -446,15 +445,15 @@ class AuthStore:
         return user
 
     def get_api_key(
-        self, user: Optional[UserProfile], provider: str
-    ) -> Optional[str]:
+        self, user: UserProfile | None, provider: str
+    ) -> str | None:
         cfg = self.get_provider_config(user, provider)
         if not cfg:
             return None
         key = (cfg.api_key or "").strip()
         return key or None
 
-    def list_usernames(self) -> List[str]:
+    def list_usernames(self) -> list[str]:
         return sorted(p.stem for p in self.base_dir.glob("*.json"))
 
 

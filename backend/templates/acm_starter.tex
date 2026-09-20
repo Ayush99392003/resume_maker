@@ -1,0 +1,105 @@
+% Academic Research Paper — ACM SIGCONF Style Format
+\documentclass[10pt,twocolumn]{article}
+
+\usepackage[margin=0.75in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{cite}
+\usepackage[dvipsnames]{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{colorlinks=true,linkcolor=Maroon,citecolor=Maroon,urlcolor=Maroon}
+
+\begin{document}
+
+% ZONE:TITLE_AUTHORS:START
+\title{\textbf{Verified Document Composition via Modular Agent Specialization}}
+\author{
+  Morgan Vance \\
+  ACM Member \\
+  School of Informatics, University of Edinburgh \\
+  \texttt{m.vance@ed.ac.uk}
+  \and
+  Casey Jordan \\
+  Department of Computer Science \\
+  ETH Z{\"u}rich \\
+  \texttt{casey.jordan@inf.ethz.ch}
+}
+\date{}
+\maketitle
+% ZONE:TITLE_AUTHORS:END
+
+% ZONE:ABSTRACT:START
+\begin{abstract}
+Interactive document synthesis tools often produce uncompilable source code when processing multi-turn human revisions. In this paper, we introduce a verification-driven architecture for ACM-compliant manuscript production. We decompose the generation space into isolated AST zones guarded by type checkers and constraint solvers. Our evaluation demonstrates a 99.1\% compilation success rate across 500 benchmark ACM papers with negligible overhead.
+\end{abstract}
+% ZONE:ABSTRACT:END
+
+% ZONE:KEYWORDS:START
+\paragraph{\textbf{CCS Concepts}}
+$\bullet$ \textbf{Software and its engineering} $\rightarrow$ Software architectures; Software verification and validation; $\bullet$ \textbf{Computing methodologies} $\rightarrow$ Artificial intelligence.
+
+\paragraph{\textbf{Keywords}}
+Document synthesis, multi-agent systems, automated repair, ACM format.
+% ZONE:KEYWORDS:END
+
+% ZONE:INTRODUCTION:START
+\section{Introduction}
+Modern research software engineering mandates publication-grade documentation and manuscripts adhering to strict conference formatting criteria. Generating such documents via generative AI frequently violates macro and formatting contracts, requiring costly manual intervention.
+
+To solve this, we contribute:
+\begin{itemize}
+  \item A formal zone-based partitioning strategy for ACM publications.
+  \item An automated runtime repair pipeline mitigating macro conflicts.
+  \item An open-source benchmark suite for evaluating document synthesis.
+\end{itemize}
+% ZONE:INTRODUCTION:END
+
+% ZONE:METHODOLOGY:START
+\section{Methodology}
+Our architecture coordinates specialized agents via an immutable AST registry.
+
+\subsection{Constraint Formulation}
+Let $\mathcal{C}$ denote the set of structural invariants required by the target publication venue. For each zone $z \in \mathcal{Z}$, the agent must satisfy:
+\begin{equation}
+\forall c \in \mathcal{C}, \quad \text{Verify}(z, c) = \text{True}
+\end{equation}
+If any constraint is violated, the repair engine intervenes before compilation.
+% ZONE:METHODOLOGY:END
+
+% ZONE:EXPERIMENTS:START
+\section{Evaluation}
+We evaluated the verification engine across three benchmark suites.
+
+\begin{table}[ht]
+\centering
+\caption{Benchmark results for ACM manuscript generation.}
+\label{tab:acm_results}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Configuration} & \textbf{Valid AST (\%)} & \textbf{Pass Rate (\%)} & \textbf{Time (s)} \\
+\midrule
+Unconstrained & 62.4 & 58.1 & 12.3 \\
+Rule-Based    & 84.1 & 81.7 & 7.4  \\
+Our Approach  & \textbf{99.8} & \textbf{99.1} & \textbf{2.8}  \\
+\bottomrule
+\end{tabular}
+\end{table}
+% ZONE:EXPERIMENTS:END
+
+% ZONE:CONCLUSION:START
+\section{Conclusion}
+We have presented an automated verification framework for ACM-compliant manuscript authoring. Our results confirm that domain-specific agent isolation drastically improves compilation reliability.
+% ZONE:CONCLUSION:END
+
+% ZONE:REFERENCES:START
+\begin{thebibliography}{99}
+\bibitem{knuth1974}
+D.~E.~Knuth, ``Structured programming with go to statements,'' \emph{ACM Computing Surveys}, vol.~6, no.~4, pp.~261--301, 1974.
+
+\bibitem{dijkstra1968}
+E.~W.~Dijkstra, ``Letters to the editor: Go to statement considered harmful,'' \emph{Communications of the ACM}, vol.~11, no.~3, pp.~147--148, 1968.
+\end{thebibliography}
+% ZONE:REFERENCES:END
+
+\end{document}

@@ -14,7 +14,6 @@ build_debug_payload(latex, error_log, zone_id=None) -> dict
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Tuple
 
 try:
     from core.logging_setup import get_logger
@@ -38,7 +37,7 @@ _REAL_ERROR_LINE_RE = re.compile(
 _ERR_LINE_RE = re.compile(r"\.tex:(\d+):")
 
 
-def build_line_index(latex: str) -> Dict[int, str]:
+def build_line_index(latex: str) -> dict[int, str]:
     """Return a 1-indexed mapping of line numbers to LaTeX lines.
 
     Args:
@@ -53,7 +52,7 @@ def build_line_index(latex: str) -> Dict[int, str]:
 
 def zone_line_range(
     latex: str, zone_id: str
-) -> Optional[Tuple[int, int]]:
+) -> tuple[int, int] | None:
     """Find the 1-indexed start/end line numbers of a zone block.
 
     Searches for ``% ZONE:<zone_id>:START`` and ``% ZONE:<zone_id>:END``
@@ -73,7 +72,7 @@ def zone_line_range(
     end_pat = re.compile(
         rf"^%\s*ZONE:{re.escape(zone_id)}:END\s*$"
     )
-    start_ln: Optional[int] = None
+    start_ln: int | None = None
     for i, line in enumerate(lines, start=1):
         if start_ln is None and start_pat.match(line):
             start_ln = i
@@ -82,14 +81,14 @@ def zone_line_range(
     return None
 
 
-def _error_line_numbers(error_log: str) -> List[int]:
+def _error_line_numbers(error_log: str) -> list[int]:
     """Extract all referenced line numbers from a Tectonic error log."""
     return [int(m.group(1)) for m in _ERR_LINE_RE.finditer(error_log)]
 
 
 def _zone_containing_line(
     latex: str, lineno: int
-) -> Optional[str]:
+) -> str | None:
     """Return the zone_id whose block contains *lineno*, or None."""
     for m in _ZONE_START.finditer(latex):
         zone_id = m.group("id")
@@ -100,10 +99,10 @@ def _zone_containing_line(
 
 
 def _context_window(
-    line_index: Dict[int, str],
-    line_numbers: List[int],
+    line_index: dict[int, str],
+    line_numbers: list[int],
     padding: int = 6,
-) -> Dict[int, str]:
+) -> dict[int, str]:
     """Return line dict sliced to [min_err - padding, max_err + padding]."""
     if not line_numbers or not line_index:
         return {}
@@ -118,7 +117,7 @@ def _context_window(
 def build_debug_payload(
     latex: str,
     error_log: str,
-    zone_id: Optional[str] = None,
+    zone_id: str | None = None,
     context_padding: int = 6,
 ) -> dict:
     """Produce a JSON-serialisable debug payload for the fixer agent.
@@ -151,7 +150,7 @@ def build_debug_payload(
                 break
 
     # Get zone range
-    zone_rng: Optional[Tuple[int, int]] = None
+    zone_rng: tuple[int, int] | None = None
     if zone_id:
         zone_rng = zone_line_range(latex, zone_id)
 

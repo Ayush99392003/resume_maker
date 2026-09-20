@@ -2,269 +2,46 @@
 
 from __future__ import annotations
 
-import json
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 try:
-    from llm_router import ChatMessage, llm_router
-    from core.zones import zone_engine
+    from core.latex_sanitizer import (
+        _clean_backslash_typos,
+        _pre_escape_backslashes,
+        safe_escape_latex_text,
+        safe_extract_json,
+    )
     from core.logging_setup import get_logger
+    from core.zones import zone_engine
+    from llm_router import ChatMessage, llm_router
 except ImportError:
+    from ..latex_sanitizer import (
+        _clean_backslash_typos,
+        _pre_escape_backslashes,
+        safe_escape_latex_text,
+        safe_extract_json,
+    )
     from ..llm_router import ChatMessage, llm_router  # type: ignore
-    from ..zones import zone_engine
     from ..logging_setup import get_logger
+    from ..zones import zone_engine
 
 log = get_logger("zone_agents")
 
-
-def _extract_json(text: str) -> dict:
-    """Extract and parse JSON object from LLM response string."""
-    text = (text or "").strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    text = _pre_escape_backslashes(text)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(0))
-            except Exception:
-                pass
-        return {}
-
-
-def _pre_escape_backslashes(raw: str) -> str:
-    r"""Pre-process raw LLM text before JSON parse.
-
-    Walk the string character-by-character, tracking whether we are inside
-    a JSON string literal.  When inside a string, double any backslash that
-    is NOT already part of a valid two-character JSON escape sequence
-    (``\\``, ``\"``, ``\/``, ``\b``, ``\f``, ``\n``, ``\r``, ``\t``,
-    ``\uXXXX``).  This correctly handles LaTeX commands like
-    ``\resumeItem``, ``\fancyhf``, ``\bullet``, ``\begin``, ``\end``
-    without mangling the ``\r``, ``\b``, ``\f`` prefix letters.
-
-    Args:
-        raw: Raw text returned by the LLM (may or may not be JSON).
-
-    Returns:
-        Text with bare LaTeX backslashes doubled so JSON can parse them.
-    """
-    _JSON_ESCAPES = frozenset('"\\/ bfnrtu')
-    _HEX = frozenset('0123456789abcdefABCDEF')
-
-    result: list[str] = []
-    i = 0
-    n = len(raw)
-    in_string = False
-
-    while i < n:
-        ch = raw[i]
-        if not in_string:
-            result.append(ch)
-            if ch == '"':
-                in_string = True
-            i += 1
-            continue
-        # Inside a JSON string
-        if ch == '\\' and i + 1 < n:
-            nxt = raw[i + 1]
-            if nxt in _JSON_ESCAPES:
-                # Valid JSON escape — check \uXXXX specifically
-                if nxt == 'u':
-                    hex4 = raw[i + 2: i + 6]
-                    if (
-                        len(hex4) == 4
-                        and all(c in _HEX for c in hex4)
-                    ):
-                        # Valid \uXXXX — pass through as-is
-                        result.append(ch)
-                        result.append(nxt)
-                        i += 2
-                        continue
-                    # else: \u not followed by 4 hex — fall through to double
-                elif nxt != 'u':
-                    # Standard two-char escape: pass through
-                    # BUT: if nxt is b/f/n/r/t and the char after is alpha,
-                    # this is a LaTeX command (e.g. \begin, \resumeItem)
-                    # and must be doubled.
-                    if nxt in 'bfnrt':
-                        after = raw[i + 2] if i + 2 < n else ''
-                        if after.isalpha():
-                            # LaTeX command — double the backslash
-                            result.append('\\\\')
-                            i += 1
-                            continue
-                    # Genuine JSON escape (\n, \t, \r, \\, \", etc.)
-                    result.append(ch)
-                    result.append(nxt)
-                    i += 2
-                    continue
-            # Not a valid JSON escape — double the backslash
-            result.append('\\\\')
-            i += 1
-            continue
-        if ch == '"':
-            in_string = False
-        result.append(ch)
-        i += 1
-
-    return ''.join(result)
-
-
-def _clean_backslash_typos(text: str) -> str:
-    """Restore backslashes on commands merged with newlines (e.g. \\nitem)."""
-    pattern = (
-        r'\\n(item|begin|end|cventry|cvitem|section|'
-        r'subsection|textbf|textit|href)\b'
-    )
-    return re.sub(pattern, r'\n\\\1', text)
-
-
-# Characters that need escaping in LaTeX text mode
-_LATEX_ESCAPABLE: dict[str, str] = {
-    '&': r'\&',
-    '$': r'\$',
-    '^': r'\^{}',
-    '~': r'\textasciitilde{}',
-    '%': r'\%',
-    '_': r'\_',
-    '#': r'\#',
-}
-
-
-def _is_math_pair(text: str, start_idx: int) -> int:
-    """Return closing $ index if text[start_idx] starts a math pair, else -1."""
-    if start_idx + 1 >= len(text):
-        return -1
-    # If immediately followed by a digit, currency symbol, or whitespace, it's currency
-    next_ch = text[start_idx + 1]
-    if next_ch.isdigit() or next_ch in " \t\r\n.,;:)":
-        return -1
-    eol = text.find("\n", start_idx)
-    limit = eol if eol != -1 else len(text)
-    close_idx = text.find("$", start_idx + 1, limit)
-    if close_idx == -1:
-        return -1
-    # Check that closing $ is not escaped
-    if close_idx > 0 and text[close_idx - 1] == "\\":
-        return -1
-    inner = text[start_idx + 1: close_idx].strip()
-    # If inner looks like currency ($100k or $50 to $100), not math
-    if any(c.isdigit() for c in inner) and not any(
-        op in inner for op in "+-*/=^_\\{}<>"
-    ):
-        return -1
-    return close_idx
-
-
-def _escape_raw_latex_chars(text: str) -> str:
-    """Context-aware escaper for bare LaTeX special characters.
-
-    Escapes ``%``, ``_``, ``#``, ``&``, ``$``, ``^``, ``~`` that are
-    NOT already escaped (preceded by ``\\``) and are NOT inside a
-    genuine ``$...$`` inline math region, LaTeX comment, or tabular
-    alignment environment.
-
-    Args:
-        text: LaTeX fragment from the LLM.
-
-    Returns:
-        Fragment with bare special characters escaped.
-    """
-    result: list[str] = []
-    i = 0
-    n = len(text)
-    math_end_idx = -1
-    prev_backslash = False
-    tabular_depth = 0
-
-    while i < n:
-        # Track tabular environment boundaries so column & alignment is preserved
-        if text[i:].startswith(r"\begin{tabular") or text[i:].startswith(r"\begin{tabular*"):
-            tabular_depth += 1
-        elif text[i:].startswith(r"\end{tabular") or text[i:].startswith(r"\end{tabular*"):
-            tabular_depth = max(0, tabular_depth - 1)
-
-        ch = text[i]
-
-        if prev_backslash:
-            # We are inside a control sequence name — emit unchanged.
-            result.append(ch)
-            prev_backslash = ch.isalpha()
-            i += 1
-            continue
-
-        if ch == '\\':
-            result.append(ch)
-            prev_backslash = True
-            i += 1
-            continue
-
-        # Check math mode boundary
-        if i < math_end_idx:
-            # Inside active math region
-            result.append(ch)
-            i += 1
-            continue
-
-        if ch == '$':
-            # Check if this starts a genuine math pair
-            closing = _is_math_pair(text, i)
-            if closing != -1:
-                math_end_idx = closing
-                result.append(ch)
-                i += 1
-                continue
-            # Currency dollar sign (e.g. $120k, $50, $85,000)
-            result.append(r"\$")
-            i += 1
-            continue
-
-        if ch == '%':
-            # Rest of line is a LaTeX comment — emit unchanged to EOL.
-            eol = text.find('\n', i)
-            if eol == -1:
-                result.append(text[i:])
-                break
-            result.append(text[i: eol + 1])
-            i = eol + 1
-            continue
-
-        if ch == '&':
-            # Do NOT escape & if inside a tabular alignment environment
-            if tabular_depth > 0:
-                result.append(ch)
-                i += 1
-                continue
-
-        replacement = _LATEX_ESCAPABLE.get(ch)
-        if replacement is not None:
-            result.append(replacement)
-        else:
-            result.append(ch)
-        i += 1
-
-    return ''.join(result)
+# Aliases for backward compatibility
+_extract_json = safe_extract_json
+_escape_raw_latex_chars = safe_escape_latex_text
+_pre_escape_backslashes = _pre_escape_backslashes
+_clean_backslash_typos = _clean_backslash_typos
 
 
 def _sanitize_tex_json(obj: Any) -> Any:
-    """Restore TeX control sequences mangled by JSON decode.
-
-    De-duplicates double backslashes introduced by some LLMs
-    (``\\\\cmd`` → ``\\cmd``) and restores CR mangled macro names.
-    """
+    """Restore TeX control sequences via safe_extract_json logic."""
     if isinstance(obj, str):
-        # Fix CR + letter → \r + letter (restores \resumeItem etc.)
         obj = re.sub(r"\r([a-zA-Z])", r"\\r\1", obj)
-        # De-duplicate \\cmd → \cmd (over-escaped by some LLMs)
         obj = re.sub(r"\\{2,}([a-zA-Z])", r"\\\1", obj)
         obj = _clean_backslash_typos(obj)
-        obj = _escape_raw_latex_chars(obj)
+        obj = safe_escape_latex_text(obj)
         return obj
     elif isinstance(obj, dict):
         return {k: _sanitize_tex_json(v) for k, v in obj.items()}
@@ -317,11 +94,11 @@ class ZoneAgent:
         current_zone: str,
         full_digest: str,
         is_initial: bool,
-        provider: Optional[str],
-        model: Optional[str],
-        api_key: Optional[str],
+        provider: str | None,
+        model: str | None,
+        api_key: str | None,
         max_retries: int = 3,
-    ) -> Tuple[str, str]:
+    ) -> tuple[str, str]:
         """Return (new_zone_latex, short_summary)."""
         mode = "initial fill from bio" if is_initial else "targeted edit"
 
@@ -544,7 +321,38 @@ ZONE_AGENT_CLASSES = {
 
 # Maps lowercase words in zone descriptions/kinds to agent class keys
 _DESC_TO_AGENT: list[tuple[tuple[str, ...], str]] = [
-    (("experience", "work", "job", "employment", "career"), "EXPERIENCE"),
+    # Academic paper specific phrases first to prevent generic overlap
+    (("related work", "literature", "prior work", "survey"), "RELATED_WORK"),
+    (
+        ("title", "author", "affiliation", "institute", "metadata"),
+        "TITLE_AUTHORS",
+    ),
+    (("abstract", "keyword", "index term"), "ABSTRACT"),
+    (("introduction", "intro", "background", "motivation"), "INTRODUCTION"),
+    (
+        ("method", "algorithm", "formulation", "model", "approach"),
+        "METHODOLOGY",
+    ),
+    (
+        ("experiment", "evaluation", "result", "benchmark", "ablation"),
+        "EXPERIMENTS",
+    ),
+    (("discussion", "analysis", "limitation", "tradeoff"), "DISCUSSION"),
+    (("conclusion", "future work"), "CONCLUSION"),
+    (("reference", "bibliography", "citation", "bib"), "REFERENCES"),
+    (("appendix", "supplementary", "proof"), "APPENDIX"),
+    # Resume zones
+    (
+        (
+            "work experience",
+            "experience",
+            "employment",
+            "career",
+            "job",
+            "work",
+        ),
+        "EXPERIENCE",
+    ),
     (("project", "portfolio", "work sample"), "PROJECTS"),
     (("education", "degree", "school", "university", "academic"), "EDUCATION"),
     (("skill", "stack", "technolog", "language", "tool"), "SKILLS"),
@@ -553,7 +361,7 @@ _DESC_TO_AGENT: list[tuple[tuple[str, ...], str]] = [
 ]
 
 
-def _description_to_agent_key(description: str, kind: str) -> Optional[str]:
+def _description_to_agent_key(description: str, kind: str) -> str | None:
     """Map a zone description/kind string to a semantic agent class key.
 
     Args:
@@ -574,14 +382,18 @@ class ZoneAgentRouter:
     """Classifies which zones to touch, then calls the matching zone agents."""
 
     def __init__(self):
-        self.agents: Dict[str, ZoneAgent] = {
+        self.agents: dict[str, ZoneAgent] = {
             zid: cls() for zid, cls in ZONE_AGENT_CLASSES.items()
         }
+
+    def register_agent(self, zone_id: str, agent: ZoneAgent) -> None:
+        """Register or override a specialist agent for a zone ID."""
+        self.agents[zone_id.upper()] = agent
 
     def _resolve_agent(
         self,
         zone_id: str,
-        zone_catalog: Optional[List[Dict]] = None,
+        zone_catalog: list[dict] | None = None,
     ) -> ZoneAgent:
         """Return the best specialist for *zone_id*.
 
@@ -632,13 +444,13 @@ class ZoneAgentRouter:
     def _classify(
         self,
         user_message: str,
-        available: List[str],
+        available: list[str],
         *,
         is_initial: bool,
-        provider: Optional[str],
-        model: Optional[str],
-        api_key: Optional[str],
-    ) -> List[str]:
+        provider: str | None,
+        model: str | None,
+        api_key: str | None,
+    ) -> list[str]:
         if is_initial:
             # First bio fill: run every available specialist
             return [z for z in available if z in self.agents] or available
@@ -669,8 +481,6 @@ class ZoneAgentRouter:
             key = str(z).strip().upper()
             if key in available_upper:
                 chosen.append(available_upper[key])
-            elif key in self.agents and key in available_upper:
-                chosen.append(available_upper[key])
         if not chosen and available:
             # fallback if model did not return a valid zone
             chosen = [available[0]]
@@ -689,11 +499,11 @@ class ZoneAgentRouter:
         user_message: str,
         latex_code: str,
         is_initial: bool = False,
-        provider: Optional[str] = None,
-        model: Optional[str] = None,
-        api_key: Optional[str] = None,
-        zone_catalog: Optional[List[Dict]] = None,
-    ) -> Dict[str, Any]:
+        provider: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
+        zone_catalog: list[dict] | None = None,
+    ) -> dict[str, Any]:
         available = zone_engine.list_zones(latex_code)
         if not available:
             log.error("zone_agent.error: no ZONE markers in template")
@@ -716,9 +526,9 @@ class ZoneAgentRouter:
         digest = zone_engine.zone_digest(latex_code)
         current_map = zone_engine.extract_zones(latex_code)
 
-        updates: Dict[str, str] = {}
-        summaries: List[str] = []
-        trace: List[Dict[str, Any]] = [
+        updates: dict[str, str] = {}
+        summaries: list[str] = []
+        trace: list[dict[str, Any]] = [
             {"tool": "zone_router.classify", "zones": targets}
         ]
 
@@ -746,7 +556,7 @@ class ZoneAgentRouter:
                 )
             except Exception as e:
                 log.exception(
-                    "zone_agent.error: %s failed - %s", zone_id, e
+                    "zone_agent.error: %s failed", zone_id
                 )
                 trace.append(
                     {
@@ -786,9 +596,9 @@ class ZoneAgentRouter:
         full_digest: str,
         user_message: str,
         is_initial: bool,
-        provider: Optional[str],
-        model: Optional[str],
-        api_key: Optional[str],
+        provider: str | None,
+        model: str | None,
+        api_key: str | None,
     ) -> tuple[str, str]:
         """Run the appropriate ZoneAgent for a numbered document zone.
 
@@ -798,7 +608,8 @@ class ZoneAgentRouter:
 
         Args:
             zone_no: Numeric zone identifier in the ZoneDocument.
-            zone_description: Human-readable description (e.g. 'Work experience').
+            zone_description: Human-readable description
+                (e.g. 'Work experience').
             zone_kind: Kind string (e.g. 'predefined_experience').
             current_zone: Current inner LaTeX of this zone.
             full_digest: Digest of all zones for context.

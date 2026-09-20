@@ -9,22 +9,21 @@ import uuid
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
 _PROJECT_ID = re.compile(
     r"overleaf\.com/(?:project|read)/(?:([a-f0-9]{24})|([a-zA-Z0-9_-]+))",
-    re.I,
+    re.IGNORECASE,
 )
 _GALLERY = re.compile(
     r"overleaf\.com/latex/templates/([^/?#]+)/([a-zA-Z0-9]+)",
-    re.I,
+    re.IGNORECASE,
 )
 _GITHUB_ZIP = re.compile(
     r"https?://github\.com/([^/]+)/([^/]+)(?:/tree/([^/?#]+))?",
-    re.I,
+    re.IGNORECASE,
 )
 
 IMPORTS_DIR = Path(__file__).resolve().parent.parent / "data" / "imports"
@@ -45,13 +44,13 @@ class OverleafImportError(Exception):
 class ImportResult:
     latex: str
     source_url: str
-    project_dir: Optional[str] = None
-    main_tex: Optional[str] = None
-    warnings: List[str] = field(default_factory=list)
-    files: List[str] = field(default_factory=list)
+    project_dir: str | None = None
+    main_tex: str | None = None
+    warnings: list[str] = field(default_factory=list)
+    files: list[str] = field(default_factory=list)
 
 
-def validate_overleaf_url(url: str) -> Tuple[str, str]:
+def validate_overleaf_url(url: str) -> tuple[str, str]:
     """
     Normalize and classify URL.
     Returns (kind, normalized_url) where kind is gallery|project|github|raw.
@@ -83,7 +82,7 @@ def validate_overleaf_url(url: str) -> Tuple[str, str]:
     )
 
 
-def _download(url: str, timeout: int = 45) -> Tuple[bytes, str]:
+def _download(url: str, timeout: int = 45) -> tuple[bytes, str]:
     req = Request(
         url,
         headers={
@@ -99,7 +98,7 @@ def _download(url: str, timeout: int = 45) -> Tuple[bytes, str]:
         return data, final
 
 
-def _pick_main_tex(paths: List[str]) -> Optional[str]:
+def _pick_main_tex(paths: list[str]) -> str | None:
     basenames = {Path(p).name.lower(): p for p in paths if p.lower().endswith(".tex")}
     for candidate in ("main.tex", "resume.tex", "cv.tex", "resume_cv.tex"):
         if candidate in basenames:
@@ -117,7 +116,7 @@ def _read_text(raw: bytes) -> str:
         return raw.decode("latin-1")
 
 
-def _extract_zip_to_dir(data: bytes, dest: Path) -> List[str]:
+def _extract_zip_to_dir(data: bytes, dest: Path) -> list[str]:
     dest.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         # Guard zip-slip
@@ -143,7 +142,7 @@ def _flatten_single_root(project_dir: Path) -> Path:
     return project_dir
 
 
-def _load_main_from_dir(project_dir: Path) -> Tuple[str, str, List[str]]:
+def _load_main_from_dir(project_dir: Path) -> tuple[str, str, list[str]]:
     tex_files = [str(p.relative_to(project_dir)).replace("\\", "/")
                  for p in project_dir.rglob("*.tex")]
     if not tex_files:
@@ -162,7 +161,7 @@ def _load_main_from_dir(project_dir: Path) -> Tuple[str, str, List[str]]:
     return best[1], best[0], tex_files
 
 
-def _gallery_candidates(url: str) -> List[str]:
+def _gallery_candidates(url: str) -> list[str]:
     g = _GALLERY.search(url)
     if not g:
         return [url]
@@ -176,7 +175,7 @@ def _gallery_candidates(url: str) -> List[str]:
     ]
 
 
-def _project_candidates(url: str) -> List[str]:
+def _project_candidates(url: str) -> list[str]:
     m = _PROJECT_ID.search(url)
     cands = []
     if m:
@@ -187,7 +186,7 @@ def _project_candidates(url: str) -> List[str]:
     return cands
 
 
-def _github_zip_url(url: str) -> Optional[str]:
+def _github_zip_url(url: str) -> str | None:
     m = _GITHUB_ZIP.search(url)
     if not m:
         return None
@@ -203,13 +202,13 @@ def _new_import_dir() -> Path:
     return path
 
 
-def _try_html_for_zip_links(html: str, base_url: str) -> List[str]:
+def _try_html_for_zip_links(html: str, base_url: str) -> list[str]:
     """Pull zip / github / download links from an Overleaf HTML page."""
     found = []
     for m in re.finditer(
         r'href=["\']([^"\']*(?:download|\.zip|github\.com)[^"\']*)["\']',
         html,
-        re.I,
+        re.IGNORECASE,
     ):
         href = m.group(1)
         abs_url = urljoin(base_url, href)
@@ -231,8 +230,8 @@ def import_overleaf_url(url: str) -> ImportResult:
     """
     kind, normalized = validate_overleaf_url(url)
     log.info("import start kind=%s url=%s", kind, normalized)
-    warnings: List[str] = []
-    candidates: List[str] = []
+    warnings: list[str] = []
+    candidates: list[str] = []
 
     if kind == "gallery":
         candidates = _gallery_candidates(normalized)
@@ -246,8 +245,8 @@ def import_overleaf_url(url: str) -> ImportResult:
     else:
         candidates = [normalized]
 
-    last_err: Optional[Exception] = None
-    html_follow: List[str] = []
+    last_err: Exception | None = None
+    html_follow: list[str] = []
     visited = set()
     queue = list(candidates)
 
@@ -346,6 +345,6 @@ def import_overleaf_url(url: str) -> ImportResult:
 
 
 # Back-compat helper used by older call sites expecting a tuple
-def import_overleaf_url_legacy(url: str) -> Tuple[str, str]:
+def import_overleaf_url_legacy(url: str) -> tuple[str, str]:
     result = import_overleaf_url(url)
     return result.latex, result.source_url

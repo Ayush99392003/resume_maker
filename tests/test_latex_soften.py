@@ -1,13 +1,12 @@
 """Tectonic-compat softening for Overleaf pastes."""
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parents[1] / "backend"
 sys.path.insert(0, str(BACKEND))
 
-from core.latex_soften import soften_latex_for_tectonic  # noqa: E402
-
+from core.latex_soften import soften_latex_for_tectonic
 
 RAW = r"""
 \documentclass{article}

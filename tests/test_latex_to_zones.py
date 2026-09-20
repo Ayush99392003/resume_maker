@@ -1,13 +1,12 @@
 """Tests for LaTeX → numbered zones conversion and assemble."""
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parents[1] / "backend"
 sys.path.insert(0, str(BACKEND))
 
-from core.latex_to_zones import latex_to_zones  # noqa: E402
-from core.zone_document import ZoneDocument  # noqa: E402
+from core.latex_to_zones import latex_to_zones
 
 SAMPLE = r"""
 \documentclass{article}
@@ -74,3 +73,45 @@ BS CS
     doc = latex_to_zones(latex)
     assert len(doc.zones) >= 2
     assert doc.next_zone_no == len(doc.zones) + 1
+
+
+def test_nested_braces_and_academic_environments():
+    latex = r"""
+\documentclass{article}
+\begin{document}
+\title{Paper Title}
+\author{Alice Smith}
+\maketitle
+
+\begin{abstract}
+This is the abstract.
+\end{abstract}
+
+\begin{IEEEkeywords}
+deep learning, optimization
+\end{IEEEkeywords}
+
+  \section{\textbf{Introduction and Background}}
+Intro text here.
+
+\section{Methodology \& Design}
+Method text here.
+
+\appendix
+Appendix content.
+
+\begin{thebibliography}{99}
+\bibitem{ref1} Author, Title, 2024.
+\end{thebibliography}
+\end{document}
+"""
+    doc = latex_to_zones(latex)
+    descriptions = [z.description for z in doc.zones]
+    assert "Title and authors" in descriptions
+    assert "Abstract" in descriptions
+    assert "Keywords / Index terms" in descriptions
+    assert "Introduction And Background" in descriptions
+    assert "Methodology And Design" in descriptions
+    assert "Appendix" in descriptions
+    assert "References" in descriptions
+

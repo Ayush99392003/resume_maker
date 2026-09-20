@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from typing import List, Optional, Tuple
 
 from .logging_setup import get_logger
 from .zone_document import ZoneDocument, ZoneRecord
@@ -24,6 +23,20 @@ KIND_HINTS = {
     "LANGUAGES": "predefined_languages",
     "INTERESTS": "predefined_interests",
     "LINKS": "predefined_links",
+    # Academic paper zones
+    "TITLE_AUTHORS": "predefined_title_authors",
+    "ABSTRACT": "predefined_abstract",
+    "KEYWORDS": "predefined_keywords",
+    "IEEEKEYWORDS": "predefined_keywords",
+    "INTRODUCTION": "predefined_introduction",
+    "RELATED_WORK": "predefined_related_work",
+    "METHODOLOGY": "predefined_methodology",
+    "EXPERIMENTS": "predefined_experiments",
+    "DISCUSSION": "predefined_discussion",
+    "CONCLUSION": "predefined_conclusion",
+    "REFERENCES": "predefined_references",
+    "BIBLIOGRAPHY": "predefined_references",
+    "APPENDIX": "predefined_appendix",
 }
 
 DESC_FROM_NAME = {
@@ -40,6 +53,20 @@ DESC_FROM_NAME = {
     "LANGUAGES": "Languages",
     "INTERESTS": "Interests",
     "LINKS": "Links",
+    # Academic paper zones
+    "TITLE_AUTHORS": "Title and authors",
+    "ABSTRACT": "Abstract",
+    "KEYWORDS": "Keywords / Index terms",
+    "IEEEKEYWORDS": "Keywords / Index terms",
+    "INTRODUCTION": "Introduction",
+    "RELATED_WORK": "Related work",
+    "METHODOLOGY": "Methodology",
+    "EXPERIMENTS": "Experiments and results",
+    "DISCUSSION": "Discussion",
+    "CONCLUSION": "Conclusion",
+    "REFERENCES": "References",
+    "BIBLIOGRAPHY": "Bibliography",
+    "APPENDIX": "Appendix",
 }
 
 _ZONE_START = re.compile(
@@ -47,14 +74,54 @@ _ZONE_START = re.compile(
 )
 _BEGIN_DOC = re.compile(r"\\begin\{document\}", re.IGNORECASE)
 _END_DOC = re.compile(r"\\end\{document\}", re.IGNORECASE)
-_SECTION = re.compile(
-    r"^\\(?:section|section\*|subsection|subsection\*|cvsection|section\*?)"
-    r"\*?\s*(\{.*)$",
+
+_HEADING_PAT = re.compile(
+    r"^[ \t]*("
+    r"\\(?:section|subsection|cvsection)\*?\{"
+    r"|\\begin\{(?:abstract|IEEEkeywords|keywords|thebibliography)\}"
+    r"|\\appendix\b"
+    r"|\\bibliography\{"
+    r")",
     re.MULTILINE,
 )
 
 
-def _split_shell(latex: str) -> Tuple[str, str, str]:
+def _extract_balanced_braces(
+    text: str, start_pos: int = 0
+) -> tuple[str, int] | None:
+    """Extract content inside balanced {...} starting at or after start_pos.
+
+    Returns (inner_content, end_pos) or None.
+    """
+    brace_idx = text.find("{", start_pos)
+    if brace_idx == -1:
+        return None
+    depth = 0
+    i = brace_idx
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and i + 1 < len(text):
+            i += 2
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[brace_idx + 1 : i], i + 1
+        i += 1
+    return None
+
+
+def _clean_latex_title(raw_title: str) -> str:
+    """Remove LaTeX formatting commands from section title string."""
+    clean = re.sub(r"\\[a-zA-Z]+\{([^}]*)\}", r"\1", raw_title)
+    clean = re.sub(r"\\[a-zA-Z]+", "", clean)
+    clean = clean.replace("&", "and").strip()
+    return clean
+
+
+def _split_shell(latex: str) -> tuple[str, str, str]:
     begin = _BEGIN_DOC.search(latex)
     end = _END_DOC.search(latex)
     if not begin:
@@ -74,15 +141,21 @@ def _description_for(name: str, body: str) -> str:
     if key in DESC_FROM_NAME:
         return DESC_FROM_NAME[key]
     if key.isdigit():
-        # Prefer section title inside body
-        m = re.search(
-            r"\\(?:section|section\*|cvsection)\*?\{([^}]+)\}", body
-        )
+        m = re.search(r"\\(?:section|section\*|cvsection)\*?\{", body)
         if m:
-            title = re.sub(r"\\[a-zA-Z]+\{([^}]*)\}", r"\1", m.group(1))
-            title = re.sub(r"\\[a-zA-Z]+", "", title).strip()
-            if title:
-                return title
+            res = _extract_balanced_braces(body, m.start())
+            if res:
+                clean = _clean_latex_title(res[0])
+                if clean:
+                    return clean
+        if "\\begin{abstract}" in body:
+            return "Abstract"
+        if "\\begin{IEEEkeywords}" in body or "\\begin{keywords}" in body:
+            return "Keywords / Index terms"
+        if "\\begin{thebibliography}" in body or "\\bibliography{" in body:
+            return "References"
+        if "\\appendix" in body:
+            return "Appendix"
         return f"Zone {key}"
     return name.replace("_", " ").title()
 
@@ -91,13 +164,13 @@ def _kind_for(name: str) -> str:
     return KIND_HINTS.get(name.upper(), "custom")
 
 
-def _segments_from_markers(body: str) -> List[Tuple[str, str, str]]:
+def _segments_from_markers(body: str) -> list[tuple[str, str, str]]:
     """Return list of (name, leading_prefix, inner_body)."""
     starts = list(_ZONE_START.finditer(body))
     if not starts:
         return []
 
-    segments: List[Tuple[str, str, str]] = []
+    segments: list[tuple[str, str, str]] = []
     for i, start_m in enumerate(starts):
         name = start_m.group("name")
         end_pat = re.compile(
@@ -106,9 +179,6 @@ def _segments_from_markers(body: str) -> List[Tuple[str, str, str]]:
         end_m = end_pat.search(body, start_m.end())
         if not end_m:
             continue
-        prefix_start = starts[i - 1].end() if i else 0
-        # Include material between previous end and this start (e.g. \section)
-        # Actually prefix should be between previous END and this START
         if i == 0:
             leading = body[: start_m.start()]
         else:
@@ -117,46 +187,60 @@ def _segments_from_markers(body: str) -> List[Tuple[str, str, str]]:
                 rf"^%\s*ZONE:{re.escape(prev_name)}:END\s*$", re.MULTILINE
             )
             prev_end_m = prev_end.search(body, starts[i - 1].end())
-            lead_from = prev_end_m.end() if prev_end_m else starts[i - 1].end()
+            lead_from = (
+                prev_end_m.end() if prev_end_m else starts[i - 1].end()
+            )
             leading = body[lead_from : start_m.start()]
         inner = body[start_m.end() : end_m.start()]
-        if inner.startswith("\n"):
-            inner = inner[1:]
-        if inner.endswith("\n"):
-            inner = inner[:-1]
+        inner = inner.removeprefix("\n")
+        inner = inner.removesuffix("\n")
         segments.append((name, leading, inner))
     return segments
 
 
-def _segments_from_sections(body: str) -> List[Tuple[str, str, str]]:
-    matches = list(
-        re.finditer(
-            r"^(\\(?:section|subsection|cvsection)\*?\{[^\n]+)",
-            body,
-            re.MULTILINE,
-        )
-    )
+def _segments_from_sections(body: str) -> list[tuple[str, str, str]]:
+    matches = list(_HEADING_PAT.finditer(body))
     if not matches:
         text = body.strip()
         if not text:
             return []
         return [("1", "", text)]
 
-    # Content before first section → zone 1 (often header/contact)
-    segments: List[Tuple[str, str, str]] = []
+    segments: list[tuple[str, str, str]] = []
     pre = body[: matches[0].start()].strip()
     if pre:
-        segments.append(("HEADER", "", pre))
+        if "\\title" in pre or "\\author" in pre or "\\maketitle" in pre:
+            segments.append(("TITLE_AUTHORS", "", pre))
+        else:
+            segments.append(("HEADER", "", pre))
 
     for i, m in enumerate(matches):
         start = m.start()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
         block = body[start:end].strip()
-        title_m = re.search(r"\{([^}]+)\}", m.group(1))
-        raw_title = title_m.group(1) if title_m else f"Section{i+1}"
-        clean = re.sub(r"\\[a-zA-Z]+\{([^}]*)\}", r"\1", raw_title)
-        clean = re.sub(r"\\[a-zA-Z]+", "", clean)
-        clean = re.sub(r"[^A-Za-z0-9]+", "_", clean).strip("_").upper() or f"SECTION_{i+1}"
+        matched_str = m.group(1).strip()
+
+        if "\\begin{abstract}" in matched_str:
+            clean = "ABSTRACT"
+        elif (
+            "\\begin{IEEEkeywords}" in matched_str
+            or "\\begin{keywords}" in matched_str
+        ):
+            clean = "KEYWORDS"
+        elif (
+            "\\begin{thebibliography}" in matched_str
+            or "\\bibliography{" in matched_str
+        ):
+            clean = "REFERENCES"
+        elif "\\appendix" in matched_str:
+            clean = "APPENDIX"
+        else:
+            res = _extract_balanced_braces(body, m.start())
+            raw_title = res[0] if res else f"Section{i+1}"
+            cleaned_title = _clean_latex_title(raw_title)
+            slug = re.sub(r"[^A-Za-z0-9]+", "_", cleaned_title).strip("_")
+            clean = slug.upper() or f"SECTION_{i+1}"
+
         segments.append((clean[:40], "", block))
     return segments
 
@@ -164,7 +248,7 @@ def _segments_from_sections(body: str) -> List[Tuple[str, str, str]]:
 def latex_to_zones(
     latex: str,
     *,
-    source_url: Optional[str] = None,
+    source_url: str | None = None,
 ) -> ZoneDocument:
     """Split built LaTeX into fixed header/footer + numbered zones."""
     log.info(
@@ -192,8 +276,8 @@ def latex_to_zones(
         segments = [("1", "", body.strip() or "% empty body")]
         mode = "fallback"
 
-    zones: List[ZoneRecord] = []
-    order: List[int] = []
+    zones: list[ZoneRecord] = []
+    order: list[int] = []
     for idx, (name, leading, inner) in enumerate(segments, start=1):
         combined = (leading.strip("\n") + "\n" + inner.strip("\n")).strip(
             "\n"
@@ -214,10 +298,6 @@ def latex_to_zones(
             )
         )
         order.append(idx)
-
-    # Drop trailing whitespace-only material after last zone from being lost:
-    # already handled by segmenting full body for section path; for markers,
-    # trailing after last END is ignored (usually blank).
 
     log.info(
         "zones.step: done mode=%s zones=%s descs=%s",

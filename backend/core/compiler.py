@@ -161,13 +161,12 @@ class TectonicCompiler:
             proc = subprocess.run(
                 [
                     self.tectonic_path,
-                    "-X",
-                    "compile",
-                    "--outdir",
+                    "-o",
                     str(outdir),
                     str(tex_file),
                 ],
                 cwd=str(cwd),
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 check=True,
@@ -204,24 +203,55 @@ class TectonicCompiler:
                 "See https://tectonic-typesetting.github.io/book/latest/installation/",
             )
 
-    def _seed_cls_files(self, compile_dir: Path) -> None:
-        """Copy any .cls files from backend/templates/ into *compile_dir*.
+    def _soften_workspace_files(self, compile_dir: Path) -> None:
+        """Soften all .cls and .sty files in compile_dir for Tectonic."""
+        if not compile_dir.is_dir():
+            return
+        for pattern in ("*.cls", "*.sty"):
+            for fpath in compile_dir.glob(pattern):
+                try:
+                    content = fpath.read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                    softened, notes = soften_latex_for_tectonic(content)
+                    if notes:
+                        fpath.write_text(softened, encoding="utf-8")
+                        log.info(
+                            "compiler: softened %s (%s)", fpath.name, notes
+                        )
+                except OSError as e:
+                    log.warning(
+                        "compiler: could not soften %s: %s", fpath.name, e
+                    )
 
-        This ensures custom document classes like ``resume.cls`` are always
+    def _seed_cls_files(self, compile_dir: Path) -> None:
+        """Copy .cls and .sty files from backend/templates/ into compile_dir.
+
+        This ensures custom document classes like resume.cls are always
         available to Tectonic regardless of whether a session workspace is
-        used or a temp directory.  Files already present are not overwritten.
+        used or a temp directory. Softens all .cls and .sty files in the
+        workspace to neutralize crashy packages.
         """
         templates_dir = _backend_root() / "templates"
-        if not templates_dir.is_dir():
-            return
-        for cls_file in templates_dir.glob("*.cls"):
-            dest = compile_dir / cls_file.name
-            if not dest.exists():
-                try:
-                    shutil.copy2(cls_file, dest)
-                    log.debug("seeded %s into %s", cls_file.name, compile_dir)
-                except OSError as e:
-                    log.warning("could not seed %s: %s", cls_file.name, e)
+        if templates_dir.is_dir():
+            for pattern in ("*.cls", "*.sty"):
+                for template_file in templates_dir.glob(pattern):
+                    dest = compile_dir / template_file.name
+                    if not dest.exists():
+                        try:
+                            shutil.copy2(template_file, dest)
+                            log.debug(
+                                "seeded %s into %s",
+                                template_file.name,
+                                compile_dir,
+                            )
+                        except OSError as e:
+                            log.warning(
+                                "could not seed %s: %s",
+                                template_file.name,
+                                e,
+                            )
+        self._soften_workspace_files(compile_dir)
 
     def compile(self, latex_code: str, *, project_dir: str | None = None) -> bytes:
         """
@@ -262,6 +292,7 @@ class TectonicCompiler:
 
         def _compile_in_dir(target_dir: Path, init_code: str) -> tuple[bytes, str]:
             self._seed_cls_files(target_dir)
+            self._soften_workspace_files(target_dir)
             engine = RepairEngine(self)
             curr = init_code
             tf = target_dir / "resume.tex"

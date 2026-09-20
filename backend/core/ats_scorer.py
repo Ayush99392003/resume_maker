@@ -4,16 +4,13 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Dict, List, Optional
-
-import numpy as np
 
 try:
+    from core import config
     from llm_router import ChatMessage, llm_router
-    from core import config  # noqa: F401
 except ImportError:
     from ..llm_router import ChatMessage, llm_router
-    from . import config  # noqa: F401
+    from . import config
 
 
 class ATSScorer:
@@ -36,6 +33,8 @@ class ATSScorer:
         return result["embedding"]
 
     def cosine_similarity(self, v1, v2):
+        import numpy as np
+
         v1 = np.array(v1)
         v2 = np.array(v2)
         return float(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))
@@ -44,10 +43,10 @@ class ATSScorer:
         self,
         text: str,
         *,
-        provider: Optional[str] = None,
-        model: Optional[str] = None,
-        api_key: Optional[str] = None,
-    ) -> List[str]:
+        provider: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
+    ) -> list[str]:
         prompt = (
             "Extract professional skills, technologies, and qualifications. "
             'Return JSON: {"keywords": ["...", "..."]}.\n\nText:\n' + text
@@ -79,10 +78,10 @@ class ATSScorer:
         resume_text: str,
         jd_text: str,
         *,
-        provider: Optional[str] = None,
-        model: Optional[str] = None,
-        api_key: Optional[str] = None,
-    ) -> Dict:
+        provider: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
+    ) -> dict:
         jd_keys = set(
             self.extract_keywords_ai(
                 jd_text, provider=provider, model=model, api_key=api_key

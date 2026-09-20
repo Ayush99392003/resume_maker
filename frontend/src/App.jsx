@@ -92,6 +92,8 @@ export default function App() {
   const [provider, setProvider] = useState('groq');
   const [model, setModel] = useState('openai/gpt-oss-120b');
   const [providerInfo, setProviderInfo] = useState(null);
+  // Document mode: resume vs research_paper
+  const [documentMode, setDocumentMode] = useState(() => localStorage.getItem('rm_document_mode') || 'resume');
   // New-chat setup state
   const [setupMode, setSetupMode] = useState(false);
   const [setupLatexPaste, setSetupLatexPaste] = useState('');
@@ -319,6 +321,10 @@ export default function App() {
     } else {
       setCompatNote('');
     }
+    if (s.document_mode) {
+      setDocumentMode(s.document_mode);
+      localStorage.setItem('rm_document_mode', s.document_mode);
+    }
     setSetupMode(false);
     resetSetupState();
     if (s.latex_code) {
@@ -344,6 +350,10 @@ export default function App() {
   const hydrateSession = async (id) => {
     const resp = await axios.get(`${API_BASE}/sessions/${id}`);
     const s = resp.data;
+    if (s.document_mode) {
+      setDocumentMode(s.document_mode);
+      localStorage.setItem('rm_document_mode', s.document_mode);
+    }
     setSetupMode(false);
     resetSetupState();
     setSessionId(s.session_id);
@@ -370,8 +380,10 @@ export default function App() {
     setSetupError('');
     setSetupLoading(true);
     try {
+      const defaultTpl = documentMode === 'research_paper' ? 'paper_starter' : 'starter';
       const resp = await axios.post(`${API_BASE}/setup/import`, {
-        template_name: 'starter',
+        template_name: defaultTpl,
+        document_mode: documentMode,
       });
       const catalog = resp.data.catalog || [];
       setZoneCatalog(catalog);
@@ -382,15 +394,18 @@ export default function App() {
     }
   };
 
-  /** Path Ø: Fresh start — POST /sessions with no URL/latex, uses starter.tex */
-  const startChatFresh = async () => {
+  /** Path Ø: Fresh start — POST /sessions with no URL/latex, uses starter.tex or paper_starter.tex */
+  const startChatFresh = async (templateId = null) => {
     setSetupError('');
     setSetupLoading(true);
     try {
+      const defaultTpl = documentMode === 'research_paper' ? 'paper_starter' : 'starter';
+      const tpl = templateId || defaultTpl;
       const created = await axios.post(`${API_BASE}/sessions`, {
         provider,
         model,
-        template_name: 'starter',
+        template_name: tpl,
+        document_mode: documentMode,
       });
       enterChatFromSession(created.data);
       await loadSessions();
@@ -425,7 +440,10 @@ export default function App() {
       let softenedLatex = latex;
       // Prefetch: URL download or paste preview compile (already Tectonic-softened)
       if (url && !latex) {
-        const preview = await axios.post(`${API_BASE}/setup/import`, { url });
+        const preview = await axios.post(`${API_BASE}/setup/import`, {
+          url,
+          document_mode: documentMode,
+        });
         softenedLatex = preview.data.latex_code || '';
         if (preview.data.compat_notes?.length) {
           setCompatNote(
@@ -440,7 +458,10 @@ export default function App() {
         if (preview.data.pdf_base64) updatePdf(preview.data.pdf_base64);
         if (softenedLatex) setLatexCode(softenedLatex);
       } else if (latex) {
-        const preview = await axios.post(`${API_BASE}/setup/import`, { latex });
+        const preview = await axios.post(`${API_BASE}/setup/import`, {
+          latex,
+          document_mode: documentMode,
+        });
         softenedLatex = preview.data.latex_code || latex;
         if (softenedLatex) setLatexCode(softenedLatex);
         if (preview.data.compat_notes?.length) {
@@ -451,7 +472,13 @@ export default function App() {
         if (preview.data.pdf_base64) updatePdf(preview.data.pdf_base64);
         if (preview.data.compile_error) setCompileNote(preview.data.compile_error);
       }
-      const payload = { provider, model, template_name: selectedTemplate || 'modern' };
+      const defaultTpl = documentMode === 'research_paper' ? 'paper_starter' : 'starter';
+      const payload = {
+        provider,
+        model,
+        template_name: selectedTemplate || defaultTpl,
+        document_mode: documentMode,
+      };
       if (url && !latex) payload.source_url = url;
       // Prefer softened source so session stores what actually compiles
       if (softenedLatex) payload.latex = softenedLatex;
@@ -984,7 +1011,39 @@ export default function App() {
     <div className="h-full flex flex-col bg-ink-50">
       <header className="h-14 shrink-0 border-b border-ink-200 bg-white px-4 lg:px-6 flex items-center justify-between gap-4">
         <div className="flex items-center gap-3 min-w-0">
-          <span className="font-display text-lg text-ink-900">Resume Maker</span>
+          <span className="font-display text-lg text-ink-900">
+            {documentMode === 'research_paper' ? 'Research Paper' : 'Resume Maker'}
+          </span>
+          <div className="flex items-center rounded-lg border border-ink-200 bg-ink-100/60 p-0.5 text-xs font-semibold">
+            <button
+              type="button"
+              onClick={() => {
+                setDocumentMode('resume');
+                localStorage.setItem('rm_document_mode', 'resume');
+              }}
+              className={`px-2.5 py-1 rounded-md transition-colors ${
+                documentMode === 'resume'
+                  ? 'bg-white text-ink-900 shadow-xs'
+                  : 'text-ink-600 hover:text-ink-900'
+              }`}
+            >
+              Resume
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setDocumentMode('research_paper');
+                localStorage.setItem('rm_document_mode', 'research_paper');
+              }}
+              className={`px-2.5 py-1 rounded-md transition-colors ${
+                documentMode === 'research_paper'
+                  ? 'bg-white text-ink-900 shadow-xs'
+                  : 'text-ink-600 hover:text-ink-900'
+              }`}
+            >
+              Research Paper
+            </button>
+          </div>
           <span className="hidden sm:inline text-ink-200">|</span>
           <span className="hidden sm:inline text-xs text-ink-500 truncate">{profile.username}</span>
         </div>
@@ -1117,29 +1176,65 @@ export default function App() {
                   New chat
                 </p>
                 <p className="mt-1 text-sm text-ink-700">
-                  Choose how to start your resume.
+                  {documentMode === 'research_paper'
+                    ? 'Choose an academic paper template to begin.'
+                    : 'Choose how to start your resume.'}
                 </p>
               </div>
 
-              {/* Option 1 — Start Fresh */}
-              <div className="rounded-xl border border-ink-200 p-4 space-y-2 hover:border-accent/50 transition-colors">
-                <p className="text-sm font-semibold text-ink-900">⚡ Start Fresh</p>
-                <p className="text-[11px] text-ink-500 leading-snug">
-                  Instantly create an ATS-ready resume using the standard{' '}
-                  <code className="font-mono text-[10px] bg-ink-100 px-1 rounded">resume.cls</code>{' '}
-                  template. Paste your bio in chat to fill all sections automatically.
-                </p>
-                {setupError && <p className="text-xs text-red-600">{setupError}</p>}
-                <button
-                  type="button"
-                  id="start-fresh-btn"
-                  onClick={startChatFresh}
-                  disabled={setupLoading}
-                  className="w-full h-10 rounded-lg bg-ink-900 text-white text-sm font-semibold hover:bg-ink-800 transition-colors disabled:opacity-40"
-                >
-                  {setupLoading ? 'Creating…' : 'Start fresh resume'}
-                </button>
-              </div>
+              {/* Option 1 — Start Fresh / Templates */}
+              {documentMode === 'research_paper' ? (
+                <div className="rounded-xl border border-ink-200 p-4 space-y-3">
+                  <p className="text-sm font-semibold text-ink-900">📚 Academic Starter Templates</p>
+                  <p className="text-[11px] text-ink-500 leading-snug">
+                    Select a publication-grade LaTeX template with isolated zones for Abstract, Methodology, Experiments, and Citations.
+                  </p>
+                  {setupError && <p className="text-xs text-red-600">{setupError}</p>}
+                  <div className="grid grid-cols-1 gap-2 pt-1">
+                    {[
+                      { id: 'paper_starter', name: 'Standard Two-Column', desc: 'Article layout with math, algorithms, booktabs, and references' },
+                      { id: 'ieee_starter', name: 'IEEE Conference / Trans.', desc: 'IEEE format with index terms, author blocks, and numbered citations' },
+                      { id: 'acm_starter', name: 'ACM SIGCONF', desc: 'ACM format with CCS concepts, affiliations, and sigconf styling' },
+                      { id: 'arxiv_starter', name: 'arXiv / NeurIPS Preprint', desc: 'Single-column preprint format with proof environment and appendix' },
+                    ].map((tpl) => (
+                      <button
+                        key={tpl.id}
+                        type="button"
+                        onClick={() => startChatFresh(tpl.id)}
+                        disabled={setupLoading}
+                        className="text-left p-3 rounded-lg border border-ink-200 bg-ink-50/50 hover:bg-ink-100/70 hover:border-accent/40 transition-colors group disabled:opacity-40"
+                      >
+                        <div className="flex items-center justify-between">
+                          <p className="text-xs font-semibold text-ink-900 group-hover:text-accent">
+                            ⚡ {tpl.name}
+                          </p>
+                          <span className="text-[10px] font-mono text-ink-400">{tpl.id}.tex</span>
+                        </div>
+                        <p className="text-[10px] text-ink-500 mt-1 leading-snug">{tpl.desc}</p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-ink-200 p-4 space-y-2 hover:border-accent/50 transition-colors">
+                  <p className="text-sm font-semibold text-ink-900">⚡ Start Fresh</p>
+                  <p className="text-[11px] text-ink-500 leading-snug">
+                    Instantly create an ATS-ready resume using the standard{' '}
+                    <code className="font-mono text-[10px] bg-ink-100 px-1 rounded">resume.cls</code>{' '}
+                    template. Paste your bio in chat to fill all sections automatically.
+                  </p>
+                  {setupError && <p className="text-xs text-red-600">{setupError}</p>}
+                  <button
+                    type="button"
+                    id="start-fresh-btn"
+                    onClick={() => startChatFresh('starter')}
+                    disabled={setupLoading}
+                    className="w-full h-10 rounded-lg bg-ink-900 text-white text-sm font-semibold hover:bg-ink-800 transition-colors disabled:opacity-40"
+                  >
+                    {setupLoading ? 'Creating…' : 'Start fresh resume'}
+                  </button>
+                </div>
+              )}
 
               {/* Option 2 — Import / Paste */}
               <div className="rounded-xl border border-ink-200 p-4 space-y-3">
@@ -1416,7 +1511,10 @@ export default function App() {
                   );
                 })
               ) : (
-                ['Header', 'Education', 'Skills', 'Experience', 'Projects'].map((sec) => {
+                (documentMode === 'research_paper'
+                  ? ['Title & Authors', 'Abstract', 'Introduction', 'Methodology', 'Experiments', 'Conclusion', 'References']
+                  : ['Header', 'Education', 'Skills', 'Experience', 'Projects']
+                ).map((sec) => {
                   const isSel = selectedTargetZone.toLowerCase() === sec.toLowerCase();
                   return (
                     <button
@@ -1438,7 +1536,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setSelectedTargetZone(selectedTargetZone === 'full_rewrite' ? 'auto' : 'full_rewrite')}
-                title="Full Rewrite: applies instructions across the entire resume document"
+                title="Full Rewrite: applies instructions across the entire document"
                 className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
                   selectedTargetZone === 'full_rewrite'
                     ? 'bg-amber-600 text-white shadow-xs'
@@ -1447,6 +1545,34 @@ export default function App() {
               >
                 Full Rewrite
               </button>
+            </div>
+
+            {/* Quick Prompt Suggestions */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 text-[10px] text-ink-500">
+              <span className="shrink-0 font-semibold text-ink-400">Suggestions:</span>
+              {(documentMode === 'research_paper'
+                ? [
+                    'Draft Introduction with contributions',
+                    'Write Methodology with equations',
+                    'Add Experiments table (booktabs)',
+                    'Draft Conclusion & future work',
+                  ]
+                : [
+                    'Add Senior Engineer experience at Stripe',
+                    'Tailor skills for Machine Learning',
+                    'Shorten summary to 2 punchy sentences',
+                    'Add relevant coursework to Education',
+                  ]
+              ).map((suggestion) => (
+                <button
+                  key={suggestion}
+                  type="button"
+                  onClick={() => setInputValue(suggestion)}
+                  className="shrink-0 rounded bg-ink-100/70 hover:bg-ink-200/80 px-2 py-0.5 text-ink-700 transition-colors border border-ink-200/50"
+                >
+                  {suggestion}
+                </button>
+              ))}
             </div>
 
             <div className="space-y-1.5">
@@ -1708,7 +1834,7 @@ export default function App() {
                                 onChange={(e) =>
                                   setProviderDraft((prev) => ({
                                     ...prev,
-                                    [p]: { ...(prev[p] || {}), [f.k]: e.target.value },
+                                    [p]: { ...prev[p], [f.k]: e.target.value },
                                   }))
                                 }
                                 placeholder={placeholderText}

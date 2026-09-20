@@ -1,0 +1,101 @@
+% Academic Research Paper — arXiv / NeurIPS Single-Column Preprint Format
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1.1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{cite}
+\usepackage[dvipsnames]{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{colorlinks=true,linkcolor=MidnightBlue,citecolor=MidnightBlue,urlcolor=MidnightBlue}
+
+\begin{document}
+
+% ZONE:TITLE_AUTHORS:START
+\title{\textbf{Foundational Models for High-Fidelity Typesetting and Theorem Synthesis}}
+\author{
+  \textbf{Samira Patel}$^{1}$, \textbf{Devin Zhao}$^{1,2}$, \textbf{Elena Rostova}$^{2}$ \\
+  $^{1}$Center for Computational Intelligence, Stanford University \\
+  $^{2}$Open Scientific Foundation \\
+  \texttt{\{spatel, dzhao\}@stanford.edu, elena@opensci.org}
+}
+\date{}
+\maketitle
+% ZONE:TITLE_AUTHORS:END
+
+% ZONE:ABSTRACT:START
+\begin{abstract}
+Large-scale generative models have achieved remarkable success in natural language and code generation. However, formal mathematical typesetting presents unique challenges in maintaining structural invariants and syntactic correctness. In this preprint, we introduce a single-column, preprint-optimized document synthesis framework designed for rapid dissemination. We show that localized zone edits significantly reduce hallucination while preserving theorem environments and cross-references.
+\end{abstract}
+% ZONE:ABSTRACT:END
+
+% ZONE:INTRODUCTION:START
+\section{Introduction}
+Preprint archives such as arXiv demand clean, accessible formatting that prioritizes single-column readability and mathematical clarity. When authoring preprints collaboratively with AI assistants, authors frequently encounter fragile environments and broken formatting tags.
+
+In this work, we present a lightweight architecture specifically tailored for preprint authoring, featuring:
+\begin{itemize}
+  \item Single-column responsive layout with generous readability margins.
+  \item Modular zones isolating theorem proofs, experimental graphs, and appendices.
+  \item Zero-dependency compilation compatibility with standard TeX distributions.
+\end{itemize}
+% ZONE:INTRODUCTION:END
+
+% ZONE:METHODOLOGY:START
+\section{Methodology}
+We formulate preprint synthesis as an iterative refinement of mathematical expressions:
+\begin{equation}
+\mathcal{L}(\theta) = \mathbb{E}_{x \sim \mathcal{D}} \left[ -\log p_\theta(x) + \lambda \mathcal{R}_{\text{syntax}}(x) \right]
+\end{equation}
+where $\mathcal{R}_{\text{syntax}}$ penalizes broken macros and unescaped reserved symbols.
+% ZONE:METHODOLOGY:END
+
+% ZONE:EXPERIMENTS:START
+\section{Experiments and Results}
+We evaluate the framework across 200 mathematical manuscripts spanning algebra, topology, and computer science.
+
+\begin{table}[ht]
+\centering
+\caption{Compilation and formatting metrics across preprint disciplines.}
+\label{tab:arxiv_bench}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Discipline} & \textbf{Papers} & \textbf{Compile Success (\%)} & \textbf{Time (s)} \\
+\midrule
+Computer Science & 80 & 99.5 & 1.9 \\
+Mathematics      & 70 & 98.8 & 2.4 \\
+Physics          & 50 & 99.0 & 2.1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+% ZONE:EXPERIMENTS:END
+
+% ZONE:CONCLUSION:START
+\section{Conclusion}
+We have established a robust pipeline for generating and revising single-column preprints. Our modular approach enables authors to rapidly iterate on mathematical content without risking document-wide typesetting corruption.
+% ZONE:CONCLUSION:END
+
+% ZONE:REFERENCES:START
+\begin{thebibliography}{99}
+\bibitem{goodfellow2016deep}
+I.~Goodfellow, Y.~Bengio, and A.~Courville, \emph{Deep Learning}.\hskip 1em plus 0.5em minus 0.4em\relax MIT Press, 2016.
+
+\bibitem{lecun2015deep}
+Y.~LeCun, Y.~Bengio, and G.~Hinton, ``Deep learning,'' \emph{Nature}, vol.~521, no.~7553, pp.~436--444, 2015.
+\end{thebibliography}
+% ZONE:REFERENCES:END
+
+% ZONE:APPENDIX:START
+\appendix
+\section{Extended Mathematical Proofs}
+\label{sec:proofs}
+In this appendix, we present the convergence proof for the regularized syntax loss.
+Let $\mathcal{H}_k$ denote the $k$-th order Sobolev space. By the Cauchy-Schwarz inequality:
+\begin{equation}
+|\langle u, v \rangle| \le \|u\|_{\mathcal{H}_k} \|v\|_{\mathcal{H}_k}
+\end{equation}
+which establishes boundedness of the parameter update trajectory.
+% ZONE:APPENDIX:END
+
+\end{document}

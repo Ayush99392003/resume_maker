@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Tuple
 
 ZONE_START = re.compile(
     r"%\s*ZONE:(?P<name>[A-Za-z0-9_]+):START\s*$", re.MULTILINE
@@ -18,11 +17,11 @@ class ZoneError(Exception):
 class ZoneEngine:
     """Parse and surgically update % ZONE:NAME:START/END regions."""
 
-    def list_zones(self, latex: str) -> List[str]:
+    def list_zones(self, latex: str) -> list[str]:
         return [m.group("name") for m in ZONE_START.finditer(latex)]
 
-    def extract_zones(self, latex: str) -> Dict[str, str]:
-        zones: Dict[str, str] = {}
+    def extract_zones(self, latex: str) -> dict[str, str]:
+        zones: dict[str, str] = {}
         for name, content, _, _ in self._iter_zones(latex):
             zones[name] = content
         return zones
@@ -76,14 +75,14 @@ class ZoneEngine:
             f"Available: {', '.join(self.list_zones(latex)) or '(none)'}"
         )
 
-    def replace_zones(self, latex: str, updates: Dict[str, str]) -> str:
+    def replace_zones(self, latex: str, updates: dict[str, str]) -> str:
         result = latex
         for zone_id, content in updates.items():
             result = self.replace_zone(result, zone_id, content)
         return result
 
-    def validate(self, latex: str) -> Tuple[bool, List[str]]:
-        issues: List[str] = []
+    def validate(self, latex: str) -> tuple[bool, list[str]]:
+        issues: list[str] = []
         names = self.list_zones(latex)
         seen = set()
         for name in names:
@@ -126,10 +125,8 @@ class ZoneEngine:
             content_end = start_m.end() + end_m.start()
             content = latex[content_start:content_end]
             # Strip leading/trailing single newlines from marker lines
-            if content.startswith("\n"):
-                content = content[1:]
-            if content.endswith("\n"):
-                content = content[:-1]
+            content = content.removeprefix("\n")
+            content = content.removesuffix("\n")
             yield name, content, start_m.start(), content_end
 
 

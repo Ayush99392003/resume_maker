@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -20,12 +20,12 @@ class ZoneDocument(BaseModel):
 
     header: str = ""
     footer: str = ""
-    zones: List[ZoneRecord] = Field(default_factory=list)
-    zone_order: List[int] = Field(default_factory=list)
+    zones: list[ZoneRecord] = Field(default_factory=list)
+    zone_order: list[int] = Field(default_factory=list)
     next_zone_no: int = 1
-    source_url: Optional[str] = None
+    source_url: str | None = None
 
-    def zone_map(self) -> Dict[int, ZoneRecord]:
+    def zone_map(self) -> dict[int, ZoneRecord]:
         return {z.zone_no: z for z in self.zones}
 
     def get_zone(self, zone_no: int) -> ZoneRecord:
@@ -34,7 +34,7 @@ class ZoneDocument(BaseModel):
             raise KeyError(f"Unknown zone_no {zone_no}")
         return zmap[zone_no]
 
-    def catalog(self) -> List[Dict[str, Any]]:
+    def catalog(self) -> list[dict[str, Any]]:
         zmap = self.zone_map()
         rows = []
         for n in self.zone_order:
@@ -80,7 +80,7 @@ class ZoneDocument(BaseModel):
             footer = "\\end{document}\n"
 
         zmap = self.zone_map()
-        parts: List[str] = [header.rstrip() + "\n"]
+        parts: list[str] = [header.rstrip() + "\n"]
         for n in self.zone_order:
             z = zmap.get(n)
             if not z:
@@ -103,7 +103,7 @@ class ZoneDocument(BaseModel):
         description: str = "",
         latex_inner: str = "",
         kind: str = "custom",
-        after_zone_no: Optional[int] = None,
+        after_zone_no: int | None = None,
         at_start: bool = False,
     ) -> ZoneRecord:
         zone_no = self.next_zone_no
@@ -133,7 +133,7 @@ class ZoneDocument(BaseModel):
         self.zone_order = [n for n in self.zone_order if n != zone_no]
         return removed
 
-    def reorder(self, new_order: List[int]) -> None:
+    def reorder(self, new_order: list[int]) -> None:
         existing = set(self.zone_order)
         if set(new_order) != existing:
             missing = existing - set(new_order)
@@ -156,8 +156,8 @@ class ZoneDocument(BaseModel):
         self,
         zone_no: int,
         *,
-        before: Optional[int] = None,
-        after: Optional[int] = None,
+        before: int | None = None,
+        after: int | None = None,
     ) -> None:
         if zone_no not in self.zone_order:
             raise KeyError(f"Unknown zone_no {zone_no}")
@@ -188,7 +188,7 @@ class ZoneDocument(BaseModel):
             parts.append(f"[Zone {n} — {desc}] {inner}")
         return "\n".join(parts) if parts else "(no zones)"
 
-    def compact_digest(self, active_zone_no: Optional[int] = None) -> str:
+    def compact_digest(self, active_zone_no: int | None = None) -> str:
         """Generate ultra-lightweight (1-line per zone) structural context (~50-80 tokens total)."""
         lines = []
         for n in self.zone_order:
@@ -271,7 +271,7 @@ def sync_session_from_document(session: Any, doc: ZoneDocument) -> None:
     session.setup_complete = True
 
 
-def document_from_session(session: Any) -> Optional[ZoneDocument]:
+def document_from_session(session: Any) -> ZoneDocument | None:
     """Rebuild ZoneDocument from session fields, or None if not set up."""
     zones_raw = getattr(session, "zones", None) or []
     header = getattr(session, "header", None) or ""

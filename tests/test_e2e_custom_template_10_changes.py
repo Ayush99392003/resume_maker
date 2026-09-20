@@ -12,7 +12,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 # Ensure UTF-8 output on Windows consoles
 if sys.stdout.encoding != "utf-8":
@@ -30,9 +30,9 @@ from core.ai_agent import ai_agent
 from core.compiler import CompilationError, compiler
 from core.latex_to_zones import latex_to_zones
 from core.session_store import (
+    rollback_to_snapshot,
     session_store,
     take_snapshot,
-    rollback_to_snapshot,
 )
 from core.zone_document import (
     ZoneDocument,
@@ -497,7 +497,7 @@ def test_custom_resume_10_changes():
     results_table.add_column("PDF Size", style="blue")
     results_table.add_column("Status", style="bold green")
 
-    full_logs: List[Dict[str, Any]] = []
+    full_logs: list[dict[str, Any]] = []
 
     for idx, (title, prompt) in enumerate(changes, 1):
         step_prefix = f"step_{idx:02d}"
@@ -518,7 +518,7 @@ def test_custom_resume_10_changes():
 
         is_first_fill = (idx == 7)  # Step 7 adds summary; first initial fill logic if needed
 
-        log_entry: Dict[str, Any] = {
+        log_entry: dict[str, Any] = {
             "step_number": idx,
             "title": title,
             "prompt": prompt,

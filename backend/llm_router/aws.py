@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from typing import List, Optional
 
 from .base import ChatMessage, LLMProvider, LLMResponse
 
@@ -13,10 +12,10 @@ class AWSProvider(LLMProvider):
 
     def __init__(
         self,
-        region: Optional[str] = None,
-        model_id: Optional[str] = None,
-        access_key_id: Optional[str] = None,
-        secret_access_key: Optional[str] = None,
+        region: str | None = None,
+        model_id: str | None = None,
+        access_key_id: str | None = None,
+        secret_access_key: str | None = None,
     ):
         self.region = (region or "").strip() or os.getenv(
             "AWS_REGION", "us-east-1"
@@ -60,11 +59,11 @@ class AWSProvider(LLMProvider):
 
     def chat(
         self,
-        messages: List[ChatMessage],
+        messages: list[ChatMessage],
         *,
         model: str,
         temperature: float = 0.4,
-        response_format: Optional[str] = None,
+        response_format: str | None = None,
     ) -> LLMResponse:
         self.ensure_configured()
         model_id = model or self.default_model_id

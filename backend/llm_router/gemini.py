@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any
+
 from pydantic import BaseModel
 
 from .base import ChatMessage, LLMProvider, LLMResponse
@@ -13,7 +14,7 @@ from .base import ChatMessage, LLMProvider, LLMResponse
 class GeminiProvider(LLMProvider):
     name = "gemini"
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: str | None = None):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         self._client: Any = None
 
@@ -32,8 +33,8 @@ class GeminiProvider(LLMProvider):
             )
 
     def _prepare_messages(
-        self, messages: List[ChatMessage]
-    ) -> Tuple[Optional[str], str]:
+        self, messages: list[ChatMessage]
+    ) -> tuple[str | None, str]:
         sys_parts = [m.content for m in messages if m.role == "system"]
         sys_instruction = "\n\n".join(sys_parts) if sys_parts else None
 
@@ -59,20 +60,19 @@ class GeminiProvider(LLMProvider):
 
     def chat(
         self,
-        messages: List[ChatMessage],
+        messages: list[ChatMessage],
         *,
         model: str,
         temperature: float = 0.4,
-        response_format: Optional[str] = None,
+        response_format: str | None = None,
     ) -> LLMResponse:
         client = self._get_client()
         sys_instruction, input_text = self._prepare_messages(messages)
 
         resolved_model = model or "gemini-3.5-flash-lite"
-        if resolved_model.startswith("models/"):
-            resolved_model = resolved_model[len("models/"):]
+        resolved_model = resolved_model.removeprefix("models/")
 
-        kwargs: Dict[str, Any] = {
+        kwargs: dict[str, Any] = {
             "model": resolved_model,
             "input": input_text,
         }
@@ -85,7 +85,7 @@ class GeminiProvider(LLMProvider):
         res = client.interactions.create(**kwargs)
         content = getattr(res, "output_text", "") or ""
 
-        usage: Dict[str, Any] = {}
+        usage: dict[str, Any] = {}
         if hasattr(res, "usage") and res.usage:
             u = res.usage
             usage = {
@@ -103,8 +103,8 @@ class GeminiProvider(LLMProvider):
 
     def chat_model(
         self,
-        messages: List[ChatMessage],
-        response_model: Type[BaseModel],
+        messages: list[ChatMessage],
+        response_model: type[BaseModel],
         *,
         model: str,
         temperature: float = 0.4,
@@ -113,10 +113,9 @@ class GeminiProvider(LLMProvider):
         sys_instruction, input_text = self._prepare_messages(messages)
 
         resolved_model = model or "gemini-3.5-flash-lite"
-        if resolved_model.startswith("models/"):
-            resolved_model = resolved_model[len("models/"):]
+        resolved_model = resolved_model.removeprefix("models/")
 
-        kwargs: Dict[str, Any] = {
+        kwargs: dict[str, Any] = {
             "model": resolved_model,
             "input": input_text,
             "response_format": response_model.model_json_schema(),
