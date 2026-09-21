@@ -460,11 +460,16 @@ def soften_latex_for_tectonic(latex: str) -> tuple[str, list[str]]:
             src = src.replace(uc, rep)
             changes.append(f"normalized unicode {hex(ord(uc))} -> {rep}")
 
-    # Auto-escape bare currency dollar signs like $100k, $50, $85,000
-    src2, n_curr = re.subn(r"(?<!\\)\$(?=\d)", r"\$", src)
-    if n_curr:
+    # Auto-escape bare currency dollar signs without mangling math mode
+    try:
+        from core.latex_sanitizer import safe_escape_latex_text
+    except ImportError:
+        from .latex_sanitizer import safe_escape_latex_text  # type: ignore
+
+    src2 = safe_escape_latex_text(src)
+    if src2 != src:
         src = src2
-        changes.append("escaped raw currency dollar signs ($ -> \\$)")
+        changes.append("escaped raw currency/special characters")
 
     # Clean up lonely line-break \\ that trigger "There's no line here to end"
     src2, n_lb = re.subn(r"(?m)^\s*\\\\(?:\s*\[[^\]]*\])?\s*$", "", src)

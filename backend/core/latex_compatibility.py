@@ -69,6 +69,19 @@ _MATH_CMD_RE = re.compile(
     re.IGNORECASE,
 )
 
+_MISSING_DOLLAR_RE = re.compile(
+    r"!(?:\s*Missing\s*\$\s*inserted"
+    r"|\s*Extra\s*\},?\s*or\s*forgotten\s*\$)",
+    re.IGNORECASE,
+)
+
+_MISSING_MATH_BRACE_RE = re.compile(
+    r"!\s*Missing\s*\}\s*inserted.*?"
+    r"(?:\\end\{(?:align|equation|gather|multline|split|"
+    r"matrix|pmatrix|bmatrix|cases|array)\*?\}|\$)",
+    re.IGNORECASE | re.DOTALL,
+)
+
 _TABLE_CMD_RE = re.compile(
     r"Undefined control sequence\.\s*l\.\d+\s*\\("
     r"toprule|midrule|bottomrule|cmidrule|specialrule|"
@@ -299,17 +312,118 @@ class ColorHandler:
 
 
 class MathHandler:
-    """Detects missing math packages and injects amsmath/amssymb/mathtools."""
+    """Detects missing math packages and syntax errors like missing $."""
 
     @staticmethod
     def is_math_error(log_text: str) -> bool:
         if not log_text:
             return False
-        if any(
-            pkg in log_text for pkg in ("amsmath", "amssymb", "mathtools")
+        if _MISSING_DOLLAR_RE.search(log_text) or _MISSING_MATH_BRACE_RE.search(
+            log_text
+        ):
+            return True
+        if re.search(
+            r"! (?:LaTeX Error|Package \w+ Error|Undefined control sequence)"
+            r".*?(?:amsmath|amssymb|mathtools)",
+            log_text,
+            re.IGNORECASE,
         ):
             return True
         return bool(_MATH_CMD_RE.search(log_text))
+
+    @classmethod
+    def repair_missing_math_delimiter(
+        cls, source: str
+    ) -> tuple[str, dict[str, str] | None]:
+        r"""Repair corrupted inline math delimiters like \$...math...\$."""
+        def _fix_escaped_dollars(match: re.Match) -> str:
+            inner = match.group(1)
+            inner = re.sub(r"\\\^\{([^}]+)\}", r"^{\1}", inner)
+            inner = re.sub(r"\\\^(\S)", r"^\1", inner)
+            inner = re.sub(r"\\_\{([^}]+)\}", r"_{\1}", inner)
+            inner = re.sub(r"\\_(\S)", r"_\1", inner)
+            return f"${inner}$"
+
+        pattern = re.compile(
+            r"\\\$([^$\n]*?(?:\\times|\\pm|\\le|\\ge|\\neq|\\cdot|\\approx|"
+            r"\\sim|\\infty|\\partial|\\nabla|\\sum|\\prod|\\int|\\sqrt|"
+            r"\\alpha|\\beta|\\gamma|\\theta|\\mu|\\sigma|\\lambda|"
+            r"\\\^|\\\_|\^|\_)[^$\n]*?)\\\$"
+        )
+        new_src, count = pattern.subn(_fix_escaped_dollars, source)
+        if count > 0:
+            log.info("math_handler.repair: fixed %s math delimiter(s)", count)
+            return new_src, {
+                "type": "math",
+                "action": (
+                    f"repaired {count} corrupted math delimiter(s) to $...$"
+                ),
+            }
+
+        # Corrupted \$0$ or \$1$ or \$0\$ to $0$ or $1$
+        dollar_num_pattern = re.compile(r"\\\$([0-9.]+)(?:\\\$|\$)")
+        new_src, count = dollar_num_pattern.subn(r"$\1$", source)
+        if count > 0:
+            log.info(
+                "math_handler.repair: fixed %s escaped dollar number(s)",
+                count,
+            )
+            return new_src, {
+                "type": "math",
+                "action": (
+                    f"repaired {count} corrupted dollar number(s) to $...$"
+                ),
+            }
+
+        # Bare \times, \pm etc in text mode without $
+        bare_pattern = re.compile(
+            r"(?<!\$)\b([0-9.]+\s*\\times\s*"
+            r"(?:10\^\{?[0-9-]+\}?|[0-9.]+))(?!\$)"
+        )
+        new_src, count = bare_pattern.subn(r"$\1$", source)
+        if count > 0:
+            log.info(
+                "math_handler.repair: wrapped %s bare math expression(s)",
+                count,
+            )
+            return new_src, {
+                "type": "math",
+                "action": f"wrapped {count} bare math expression(s) in $...$",
+            }
+
+        return source, None
+
+    @classmethod
+    def repair_missing_brace(
+        cls, source: str
+    ) -> tuple[str, dict[str, str] | None]:
+        """Balance missing closing braces before \\end{env}."""
+        pattern = re.compile(
+            r"(\\begin\{((?:align|equation|gather|multline|split|"
+            r"matrix|pmatrix|bmatrix|cases|array)\*?)\}(.*?)\\end\{\2\})",
+            re.DOTALL,
+        )
+        for full_match, env_name, body in pattern.findall(source):
+            opens = body.count("{")
+            closes = body.count("}")
+            if opens > closes:
+                diff = opens - closes
+                braces = "}" * diff
+                fixed_env = (
+                    f"\\begin{{{env_name}}}{body}{braces}\n"
+                    f"\\end{{{env_name}}}"
+                )
+                new_source = source.replace(full_match, fixed_env, 1)
+                log.info(
+                    "math_handler.repair: inserted %s missing '}' in \\begin{%s}",
+                    diff,
+                    env_name,
+                )
+                return new_source, {
+                    "type": "math",
+                    "action": f"inserted {diff} missing '}}' in \\begin{{{env_name}}}",
+                }
+        return source, None
 
     @classmethod
     def inject_math_packages(
@@ -318,7 +432,8 @@ class MathHandler:
         pkgs_to_add: list[str] = []
         for pkg in ("amsmath", "amssymb", "mathtools"):
             if not re.search(
-                rf"\\usepackage(?:\[[^\]]*\])?\{{{pkg}\}}", source
+                rf"\\usepackage(?:\[[^\]]*\])?\{{[^}}]*\b{pkg}\b[^}}]*\}}",
+                source,
             ):
                 pkgs_to_add.append(pkg)
 
@@ -338,6 +453,32 @@ class MathHandler:
             "type": "math",
             "action": f"injected \\usepackage{{{','.join(pkgs_to_add)}}}",
         }
+
+    @classmethod
+    def repair_math(
+        cls, source: str, log_text: str = ""
+    ) -> tuple[str, dict[str, str] | None]:
+        """Dispatch targeted math repair: delimiter fix, brace balance, or package injection."""
+        if "Missing }" in log_text:
+            new_src, act = cls.repair_missing_brace(source)
+            if act:
+                return new_src, act
+
+        if _MISSING_DOLLAR_RE.search(log_text):
+            new_src, act = cls.repair_missing_math_delimiter(source)
+            if act:
+                return new_src, act
+
+        # Try package injection
+        new_src, act = cls.inject_math_packages(source)
+        if act:
+            return new_src, act
+
+        # Fallback to delimiter and brace repairs
+        new_src, act = cls.repair_missing_math_delimiter(source)
+        if act:
+            return new_src, act
+        return cls.repair_missing_brace(source)
 
 
 # ---------------------------------------------------------------------------
@@ -701,7 +842,7 @@ class RepairEngine:
 
         # 4. Math Error
         if category == "math":
-            new_src, action = MathHandler.inject_math_packages(source)
+            new_src, action = MathHandler.repair_math(source, log_text)
             if action:
                 return new_src, action
 
@@ -734,7 +875,7 @@ class RepairEngine:
         # Fallback chain: if primary category didn't apply,
         # test remaining handlers
         if MathHandler.is_math_error(log_text):
-            new_src, action = MathHandler.inject_math_packages(source)
+            new_src, action = MathHandler.repair_math(source, log_text)
             if action:
                 return new_src, action
 

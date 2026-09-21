@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -84,6 +84,13 @@ class ReorderZonesTool(BaseModel):
     swap: list[int] | None = Field(
         default=None,
         description="Pair of two zone numbers to swap positions (e.g. [2, 4]).",
+    )
+    move: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Move a single zone: e.g. {'zone_no': 4, 'after_zone_no': 5} or "
+            "{'zone_no': 4, 'to_position': 6}."
+        ),
     )
 
 
@@ -170,25 +177,29 @@ class UpdateDocumentStyleTool(BaseModel):
 
 STRUCTURE_TOOLS_DESCRIPTION = """Available Structural Tools:
 1. `add_zone`:
-   Description: Inserts a brand new section into the resume.
+   Description: Inserts a brand new section into the document.
    Arguments:
      - `title`: (string) Title of the new section.
      - `after_zone_no`: (optional integer) Place after this zone number.
      - `at_start`: (optional boolean) True if section belongs at beginning.
 
 2. `remove_zone`:
-   Description: Permanently deletes an entire section/zone from the resume.
+   Description: Permanently deletes an entire section/zone from the document.
    Arguments:
      - `zone_nos`: (list of integers) Zone numbers to remove.
 
 3. `reorder_zones`:
-   Description: Rearranges or swaps sequence of existing sections.
+   Description: Rearranges, moves, or swaps sequence of existing sections.
    Arguments:
      - `swap`: (list of two integers) e.g. [2, 3] to swap zone 2 and 3.
-     - `new_order`: (list of integers) full list of zone numbers in order.
+     - `new_order`: (list of integers) full or partial list of zone numbers.
+     - `move`: (object) Move single zone, e.g. {"zone_no": 4, "to_position": 6} or {"zone_no": 4, "after_zone_no": 5}.
 
 Return JSON format:
-{"tool": "add_zone" | "remove_zone" | "reorder_zones", "args": {...}, "reason": "..."}"""
+For single action:
+{"tool": "add_zone" | "remove_zone" | "reorder_zones", "args": {...}, "reason": "..."}
+For multiple actions:
+{"actions": [{"tool": "...", "args": {...}}, ...], "reason": "..."}"""
 
 CONTENT_TOOLS_DESCRIPTION = """Available Content Tools:
 1. `edit_zone_content`:

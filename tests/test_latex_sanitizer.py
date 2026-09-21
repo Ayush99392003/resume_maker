@@ -50,6 +50,21 @@ def test_safe_extract_json_preserves_control_sequences():
     assert "\\textbf{Key achievement}" in data["latex"]
 
 
+def test_safe_extract_json_newline_before_words():
+    """Verify \\n followed by letters is decoded as newline, not literal \\n."""
+    raw = (
+        '{"latex": "\\begin{rSection}{Summary}\\nAI Engineer with experience'
+        '\\nProgramming Languages\\nDistributed systems"}'
+    )
+    data = safe_extract_json(raw)
+    # The value must contain actual newlines, not the literal 2-char string "\n"
+    assert "\nAI Engineer" in data["latex"]
+    assert "\nProgramming Languages" in data["latex"]
+    assert "\nDistributed systems" in data["latex"]
+    assert "\\nAI Engineer" not in data["latex"]
+    assert "\\nProgramming" not in data["latex"]
+
+
 def test_safe_escape_latex_text_hex_colors_and_macros():
     text = "Color #2563EB and macro #1 with bare # in text"
     escaped = safe_escape_latex_text(text)
@@ -93,6 +108,43 @@ def test_safe_escape_latex_text_math_environments():
     assert r"\begin{align} a & b \\ c & d \end{align}" in escaped
     assert r"$\alpha_i & \beta_j$" in escaped
     assert r"$x_1 + x_2$" in escaped
+
+
+def test_safe_escape_latex_text_math_with_numbers():
+    text = (
+        r"learning rate of 0.01 and weight decay of $5 \times 10^{-4}$. "
+        r"Scale is $10^6$ and equation is $2x + 1 = 5$."
+    )
+    escaped = safe_escape_latex_text(text)
+    assert r"$5 \times 10^{-4}$" in escaped
+    assert r"$10^6$" in escaped
+    assert r"$2x + 1 = 5$" in escaped
+    assert r"\$5" not in escaped
+    assert r"\^{}" not in escaped
+
+
+def test_safe_escape_latex_text_currency_ranges():
+    text = (
+        "Raised $50,000 in seed. Salary from $100k to $150k. "
+        "Budget was $50-$100."
+    )
+    escaped = safe_escape_latex_text(text)
+    assert r"\$50,000" in escaped
+    assert r"\$100k" in escaped
+    assert r"\$150k" in escaped
+    assert r"\$50-\$100" in escaped
+
+
+def test_safe_escape_latex_text_preserves_binary_labels_zero_and_one():
+    text = (
+        r"Licit ($0$) & 42,019 & 20.62\% \\" "\n"
+        r"Illicit ($1$) & 4,545 & 9.76\% \\"
+    )
+    escaped = safe_escape_latex_text(text)
+    assert r"($0$)" in escaped
+    assert r"($1$)" in escaped
+    assert r"(\$0" not in escaped
+    assert r"(\$1" not in escaped
 
 
 def test_style_agent_heuristic_margins():

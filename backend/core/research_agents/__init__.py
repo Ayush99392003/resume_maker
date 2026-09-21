@@ -49,10 +49,12 @@ class IntroductionAgent(ZoneAgent):
     zone_id = "INTRODUCTION"
     role = "Academic paper introduction specialist"
     latex_hints = (
-        "Preserve \\section{Introduction}. Maintain academic rigor with "
-        "proper problem motivation, contextualization of prior art, clear "
-        "bullet-pointed contributions (\\begin{itemize} ... \\item), and "
-        "paper organization roadmap."
+        "Preserve \\section{Introduction} (and \\label{sec:...}). Maintain "
+        "academic rigor with proper problem motivation, contextualization of "
+        "prior art, clear bullet-pointed contributions (\\begin{itemize} ... "
+        "\\item), and paper organization roadmap. Comprehensively incorporate "
+        "all user-supplied motivations and hypotheses, replacing template "
+        "placeholder text."
     )
 
 
@@ -60,10 +62,12 @@ class RelatedWorkAgent(ZoneAgent):
     zone_id = "RELATED_WORK"
     role = "Academic paper related work and literature review specialist"
     latex_hints = (
-        "Preserve \\section{Related Work} or \\section{Literature Review}. "
-        "Group related literature thematically into subsections or bold "
-        "paragraphs. Ensure all cited works use standard \\cite{key} syntax "
-        "and draw clear contrasts with the proposed method."
+        "Preserve \\section{Related Work} or \\section{Literature Review} "
+        "(and \\label{sec:...}). Comprehensively incorporate all literature "
+        "categories and citations. Group related literature thematically into "
+        "subsections or bold paragraphs. Ensure all cited works use standard "
+        "\\cite{key} syntax and draw clear contrasts with the proposed "
+        "method. Replace template placeholder text completely."
     )
 
 
@@ -71,10 +75,14 @@ class MethodologyAgent(ZoneAgent):
     zone_id = "METHODOLOGY"
     role = "Academic paper methodology and technical formulation specialist"
     latex_hints = (
-        "Preserve \\section{Methodology} or \\section{Proposed Method}. "
-        "Use mathematically rigorous formulations with equation environments "
-        "(\\begin{equation}, \\begin{align}), algorithm listings, formal "
-        "definitions, and clean notation."
+        "Preserve \\section{Methodology} or \\section{Proposed Method} (and "
+        "\\label{sec:...}). Comprehensively incorporate all user-supplied "
+        "mathematical formulations, definitions, and algorithms. Use "
+        "equation environments (\\begin{equation}, \\begin{align}), clean "
+        "notation, and organize into logical subsections (e.g., "
+        "\\subsection{Problem Formulation}, \\subsection{Architecture}). "
+        "Completely replace template placeholder text with the user's actual "
+        "methodology."
     )
 
 
@@ -82,10 +90,23 @@ class ExperimentsAgent(ZoneAgent):
     zone_id = "EXPERIMENTS"
     role = "Academic paper experiments, evaluation, and results specialist"
     latex_hints = (
-        "Preserve \\section{Experiments} or \\section{Evaluation}. "
-        "Include dataset descriptions, baseline models, quantitative "
-        "results tables (using booktabs: \\toprule, \\midrule, \\bottomrule), "
-        "and references to figures with \\ref{fig:...}."
+        "Preserve \\section{Experiments} or \\section{Evaluation} or "
+        "\\section{Experimental Evaluation} (and \\label{sec:...}). "
+        "Comprehensively incorporate ALL user-supplied experimental details, "
+        "hyperparameters, training protocols, and evaluation metrics without "
+        "omission. "
+        "If the user mentions or describes tables (e.g., Table II with "
+        "benchmark results), generate a complete, publication-grade LaTeX "
+        "table environment (\\begin{table}[ht] or \\begin{table*}[t]) using "
+        "booktabs (\\toprule, \\midrule, \\bottomrule) with proper columns, "
+        "headers, metric values, and bold/underline formatting for best/"
+        "second-best. "
+        "Organize the content into clear subsections (e.g., "
+        "\\subsection{Experimental Setup}, \\subsection{Main Benchmark "
+        "Results}, \\subsection{Evaluation of Hypotheses}, "
+        "\\subsection{Heterophily and Robustness Analysis}). "
+        "Completely replace any outdated starter template placeholder text "
+        "and placeholder tables with the user's actual content."
     )
 
 
@@ -93,9 +114,11 @@ class DiscussionAgent(ZoneAgent):
     zone_id = "DISCUSSION"
     role = "Academic paper discussion and analysis specialist"
     latex_hints = (
-        "Preserve \\section{Discussion}. Provide deep qualitative analysis, "
-        "ablation study insights, edge case evaluations, runtime/memory "
-        "trade-offs, and honest limitations of the proposed approach."
+        "Preserve \\section{Discussion} (and \\label{sec:...}). Provide deep "
+        "qualitative analysis, ablation study insights, edge case evaluations, "
+        "runtime/memory trade-offs, and honest limitations of the proposed "
+        "approach. Comprehensively incorporate all user points, replacing "
+        "template placeholder text."
     )
 
 

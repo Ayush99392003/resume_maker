@@ -1,38 +1,53 @@
-# Implementation Plan: Compiler Breakdown & Root-Cause Fixes
+# Implementation Plan: Dynamic Interactive Zones & Layout Reordering
 
 ## Overview
-Investigation of `Logs.log` revealed four interconnected root causes causing catastrophic compiler failures across resume editing, layout squeezing, and IEEE paper compilation:
-1. **JSON Newline Corruption (`\n` -> literal `\n`)**: In `backend/core/latex_sanitizer.py`, `_pre_escape_backslashes()` treated any `\n` followed by an alphabetic character (`\nAI`, `\nProgramming`, `\nDistributed`) as a LaTeX control sequence, doubling the backslash to `\\n`. `json.loads` decoded this to literal `\n`, producing `! Undefined control sequence \n` and cascading into disastrous fixer attempts that deleted `\end{rSection}` and left `\begin{list}` unclosed.
-2. **IEEE Author Block Incompatibility with `tabular`**: In `backend/templates/ieee_starter.tex`, `\IEEEauthorblockA` was defined as `\newcommand{\IEEEauthorblockA}[1]{\textit{#1}\\}`. In standard `article` class, `\author` is evaluated inside a `tabular`. When an affiliation contains `\\`, `\textit{#1}` breaks across table cells leaving an unclosed `{`, causing `! Missing } inserted. l.33 \begin{abstract}`.
-3. **Auto-Repair Engine False Positive Loop**: In `backend/core/latex_compatibility.py`, `MathHandler.is_math_error()` matched any log containing `"mathtools"` or `"amssymb"`. Because Tectonic logs loaded files like `(mathtools.sty ...)` on every run, `is_math_error` returned `True` for every error (including `! Missing } inserted.`). Furthermore, `inject_math_packages()` had a regex that failed to match multi-package declarations like `\usepackage{amsmath,amssymb}`, repeatedly injecting duplicate `\usepackage` lines up to the retry limit.
-4. **Duplicate Zone Marker Nesting**: In `backend/core/zone_document.py`, `strip_zone_markers()` only stripped markers matching the exact numeric `zone_no`. If inner content already had zone markers, they remained unstripped and were wrapped again by `wrap_zone_body()`, creating invalid nested markers (`% ZONE:3:START\n% ZONE:3:START`).
+Currently, zones in the resume and research paper modes are rendered as static pills. Clicking anywhere on a pill prompts to delete it, drag-and-drop reordering is not implemented, adding a zone only appends to the document end without position control, and zone changes do not automatically recompile the PDF.
+This plan implements production-grade dynamic interactive zones:
+1. **Frontend Drag-and-Drop & Quick-Move Controls**: Interactive HTML5 drag-and-drop for zone chips with visual indicators, separate click-to-select from removal, and left/right single-slot shift buttons for accessibility.
+2. **Position-Aware Add Zone Modal**: Intuitive modal to specify zone title and insert position ("At start", "After Z...", "At end") with mode-aware starter LaTeX.
+3. **Automatic Compilation Pipeline**: Immediate auto-compilation (`compileAndRender`) following any reorder, add, or remove action to instantly refresh the PDF preview.
+4. **Backend Robustness & Natural Language Zone Orchestration**: Safe partial reordering in `ZoneDocument.reorder()`, mode-aware default LaTeX in `POST /zones`, and multi-step structure support (`add_zone` + `reorder_zones`/`move`) in the AI Orchestrator.
 
 ---
 
 ## Architecture Decisions
-- **Fix at the root (`ponytail` principle)**: Rather than adding workarounds or patchers downstream, fix the 4 exact points of failure at their source.
-- **Differentiate JSON newlines from LaTeX macros**: In `_pre_escape_backslashes()`, `\n` in JSON is always a newline unless followed specifically by known LaTeX commands starting with `n` (`newcommand`, `newenvironment`, `newline`, `noindent`, `nocite`, `normalsize`, `null`, `number`, `nabla`, `neq`, `neg`).
-- **Use tabular wrapper for author block**: Define `\IEEEauthorblockA` as `\newcommand{\IEEEauthorblockA}[1]{\begin{tabular}{@{}c@{}}\itshape #1\end{tabular}\\}` so multi-line affiliations with `\\` compile cleanly inside `article`'s `\author` tabular.
-- **Strict log error matching**: `is_math_error` must only match actual math errors (e.g. `_MATH_CMD_RE` or `! LaTeX Error: ... amsmath`), never benign package-loading log lines `(...sty ...)`.
+- **Native HTML5 Drag-and-Drop with Visual Cues**: Implement drag-and-drop in `frontend/src/App.jsx` using standard HTML5 DnD APIs to avoid adding heavy external drag-and-drop dependencies. Include drag preview opacity, drop target rings, and clear drop targets.
+- **Accidental Deletion Prevention**: Isolate the delete action exclusively to the `X` button with `e.stopPropagation()`. Clicking the pill body selects the zone as the active target zone (`selectedTargetZone`).
+- **Dual Reordering UX (Drag + Buttons)**: Provide both drag-and-drop and one-click move arrows (`‹` and `›`) on each pill so users on trackpads, keyboards, and mobile can reorder with zero friction.
+- **Mode-Aware Starter LaTeX**: Academic papers use numbered `\section{...}` by default, whereas resumes use unnumbered `\section*{...}` or bullet environments.
+- **Auto-Compiling Zone State**: Every zone structural change (reorder, add, remove) immediately triggers `compileAndRender` so the user never has to manually hit compile to see layout changes in the PDF.
 
 ---
 
 ## Task List
 
-### Phase 1: Core Root-Cause Fixes
-- [ ] Task 1: Fix `_pre_escape_backslashes` in `backend/core/latex_sanitizer.py` to preserve JSON `\n` before words.
-- [ ] Task 2: Fix `\IEEEauthorblockA` in `backend/templates/ieee_starter.tex` to support multi-line affiliations.
-- [ ] Task 3: Fix `MathHandler` in `backend/core/latex_compatibility.py` to eliminate false-positive error classification and duplicate package injection.
-- [ ] Task 4: Fix `strip_zone_markers` in `backend/core/zone_document.py` to prevent duplicate nested zone markers.
+### Phase 1: Backend Robustness & AI Orchestration
+- [ ] Task 1: Enhance `ZoneDocument.reorder()` in `backend/core/zone_document.py` to gracefully handle partial/fuzzy order lists without raising `ValueError`.
+- [ ] Task 2: Enhance `add_zone` in `backend/main.py` and `ZoneDocument` to provide mode-aware default LaTeX (`\section{...}` for academic papers, `\section*{...}` for resumes).
+- [ ] Task 3: Support `move` arguments and multi-action steps in `backend/core/tools.py` and `backend/core/orchestrator.py` so requests like "bring Methodology to Z6 and add RELATED WORK at Z5" can be executed in a single turn.
 
-### Checkpoint: Core Fixes
-- [ ] Automated tests pass (`test_latex_sanitizer.py`, `test_latex_compatibility.py`, `test_research_paper_mode.py`).
-- [ ] Tectonic compiles `test3.tex` and sample paper sessions without `! Missing } inserted.` or `! Undefined control sequence \n`.
+### Checkpoint: Backend Zone Tests
+- [ ] Unit tests pass for `ZoneDocument.reorder`, `ZoneDocument.move`, and `orchestrator` structure planning.
+
+### Phase 2: Frontend Interactive Zone Bar & Drag-and-Drop
+- [ ] Task 4: In `frontend/src/App.jsx`, implement `reorderZones(newOrder)` calling `PATCH /sessions/{sessionId}/zone-order`, updating state, and invoking `compileAndRender`.
+- [ ] Task 5: Implement HTML5 Drag-and-Drop (`draggable`, `onDragStart`, `onDragOver`, `onDrop`, `onDragEnd`) with visual indicators on zone chips.
+- [ ] Task 6: Separate click handlers (pill clicks select `selectedTargetZone`, `X` button exclusively removes zone) and add quick-move arrows (`‹` / `›`) to each chip.
+
+### Phase 3: Position-Aware Add Zone Modal & Instant Compilation
+- [ ] Task 7: Build `AddZoneModal` in `frontend/src/App.jsx` allowing users to choose zone title, target position ("At start", "After Z...", "At end"), and submit to `POST /sessions/{sessionId}/zones`.
+- [ ] Task 8: Trigger immediate auto-compilation (`compileAndRender`) after add, remove, and reorder operations with status feedback ("Layout updated · Compiling preview...").
+
+### Checkpoint: End-to-End Verification
+- [ ] Moving zone pills in UI updates layout and re-renders PDF.
+- [ ] Adding a zone at a specific position (e.g. "RELATED WORK at Z5") compiles correctly and places the new section at the specified slot.
+- [ ] Natural language chat request ("move Methodology to Z6 and add RELATED WORK at Z5") executes and compiles cleanly.
 
 ---
 
 ## Risks and Mitigations
 | Risk | Impact | Mitigation |
 |---|---|---|
-| LaTeX commands starting with `\n` accidentally treated as newlines | Med | Explicitly whitelist `\newcommand`, `\newline`, `\noindent`, `\nocite`, etc. |
-| Other starter templates have author block issues | Low | Audit `paper_starter.tex`, `acm_starter.tex`, `arxiv_starter.tex`. |
+| Rapid repeated dragging causing concurrent compile requests | Med | Debounce or use `compile_semaphore` and quiet auto-syncing during rapid moves. |
+| Incomplete zone lists in AI-generated reorder commands | Med | `ZoneDocument.reorder` reconciles specified zones first and appends remaining existing zones. |
+| Drag-and-drop quirks on touch screens / trackpads | Low | Provide discrete `‹` and `›` buttons on chips alongside drag-and-drop. |

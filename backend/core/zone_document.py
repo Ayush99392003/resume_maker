@@ -24,6 +24,7 @@ class ZoneDocument(BaseModel):
     zone_order: list[int] = Field(default_factory=list)
     next_zone_no: int = 1
     source_url: str | None = None
+    document_mode: str = "resume"
 
     def zone_map(self) -> dict[int, ZoneRecord]:
         return {z.zone_no: z for z in self.zones}
@@ -51,7 +52,7 @@ class ZoneDocument(BaseModel):
         return rows
 
     def wrap_zone_body(self, zone_no: int, inner: str) -> str:
-        body = (inner or "").strip("\n")
+        body = strip_zone_markers(inner or "").strip("\n")
         return f"% ZONE:{zone_no}:START\n{body}\n% ZONE:{zone_no}:END\n"
 
     def set_zone_inner(self, zone_no: int, inner: str) -> None:
@@ -105,13 +106,25 @@ class ZoneDocument(BaseModel):
         kind: str = "custom",
         after_zone_no: int | None = None,
         at_start: bool = False,
+        document_mode: str = "resume",
     ) -> ZoneRecord:
         zone_no = self.next_zone_no
         self.next_zone_no = zone_no + 1
+        if not latex_inner:
+            if document_mode == "research_paper":
+                latex_inner = (
+                    f"\\section{{{description or 'Section'}}}\n"
+                    f"% Content for {description or 'Section'}\n"
+                )
+            else:
+                latex_inner = (
+                    f"\\section*{{{description or 'Section'}}}\n"
+                    "% TODO"
+                )
         record = ZoneRecord(
             zone_no=zone_no,
             description=description or f"Zone {zone_no}",
-            latex=self.wrap_zone_body(zone_no, latex_inner or "% empty zone"),
+            latex=self.wrap_zone_body(zone_no, latex_inner),
             kind=kind,
         )
         self.zones.append(record)
@@ -134,15 +147,20 @@ class ZoneDocument(BaseModel):
         return removed
 
     def reorder(self, new_order: list[int]) -> None:
-        existing = set(self.zone_order)
-        if set(new_order) != existing:
-            missing = existing - set(new_order)
-            extra = set(new_order) - existing
-            raise ValueError(
-                f"Invalid zone_order. missing={sorted(missing)} "
-                f"extra={sorted(extra)}"
-            )
-        self.zone_order = list(new_order)
+        """Reorder zones. Tolerant of partial lists or extraneous IDs."""
+        zmap = self.zone_map()
+        seen: set[int] = set()
+        deduped: list[int] = []
+        for n in new_order:
+            if n in zmap and n not in seen:
+                seen.add(n)
+                deduped.append(n)
+        for n in self.zone_order:
+            if n not in seen and n in zmap:
+                seen.add(n)
+                deduped.append(n)
+        if deduped:
+            self.zone_order = deduped
 
     def swap(self, a: int, b: int) -> None:
         if a not in self.zone_order or b not in self.zone_order:
@@ -158,11 +176,15 @@ class ZoneDocument(BaseModel):
         *,
         before: int | None = None,
         after: int | None = None,
+        target_index: int | None = None,
     ) -> None:
         if zone_no not in self.zone_order:
             raise KeyError(f"Unknown zone_no {zone_no}")
         order = [n for n in self.zone_order if n != zone_no]
-        if before is not None:
+        if target_index is not None:
+            idx = max(0, min(target_index, len(order)))
+            order.insert(idx, zone_no)
+        elif before is not None:
             if before not in order:
                 raise KeyError(f"Unknown before zone_no {before}")
             order.insert(order.index(before), zone_no)
@@ -242,12 +264,20 @@ def ensure_full_document(latex: str) -> str:
     )
 
 
-def strip_zone_markers(latex: str, zone_no: int) -> str:
+def strip_zone_markers(latex: str, zone_no: int | str | None = None) -> str:
     text = latex or ""
-    start = re.compile(rf"%\s*ZONE:{zone_no}:START\s*\n?", re.MULTILINE)
-    end = re.compile(rf"\n?\s*%\s*ZONE:{zone_no}:END\s*", re.MULTILINE)
-    text = start.sub("", text)
-    text = end.sub("", text)
+    text = re.sub(
+        r"^[ \t]*%\s*ZONE:[^:\n]+:START[ \t]*\n?",
+        "",
+        text,
+        flags=re.MULTILINE,
+    )
+    text = re.sub(
+        r"\n?[ \t]*%\s*ZONE:[^:\n]+:END[ \t]*$",
+        "",
+        text,
+        flags=re.MULTILINE,
+    )
     return text.strip("\n")
 
 
@@ -298,7 +328,12 @@ def document_from_session(session: Any) -> ZoneDocument | None:
                         latex,
                         source_url=getattr(session, "source_url", None),
                     )
-                except Exception:
+                except (
+                    ValueError,
+                    KeyError,
+                    TypeError,
+                    AttributeError,
+                ):
                     pass
     zones = [
         ZoneRecord(**z) if isinstance(z, dict) else z
@@ -316,4 +351,5 @@ def document_from_session(session: Any) -> ZoneDocument | None:
             or (max([z.zone_no for z in zones], default=0) + 1)
         ),
         source_url=getattr(session, "source_url", None),
+        document_mode=getattr(session, "document_mode", "resume") or "resume",
     )

@@ -120,3 +120,46 @@ def test_session_store_document_mode():
         assert found.get("document_mode") == "research_paper"
     finally:
         session_store.delete(session.session_id)
+
+
+def test_document_mode_plumbing_to_zone_document():
+    """Verify document_mode is populated on ZoneDocument from session."""
+    from core.zone_document import (
+        ZoneDocument,
+        document_from_session,
+        sync_session_from_document,
+    )
+
+    default_doc = ZoneDocument()
+    assert default_doc.document_mode == "resume"
+
+    session = session_store.create(
+        title="Test Mode Plumbing",
+        template_name="paper_starter",
+        document_mode="research_paper",
+        latex_code=template_manager.get_template("paper_starter"),
+    )
+    try:
+        init_doc = latex_to_zones(session.latex_code)
+        sync_session_from_document(session, init_doc)
+        doc = document_from_session(session)
+        assert doc is not None
+        assert doc.document_mode == "research_paper"
+    finally:
+        session_store.delete(session.session_id)
+
+
+def test_latex_sanitizer_preserves_decimal_math_and_powers():
+    """Verify math mode decimals and power notations are not corrupted."""
+    from core.latex_sanitizer import safe_escape_latex_text
+
+    text = (
+        r"Learning rate of $0.01$ and weight decay of $5 \times 10^{-4}$ "
+        r"with weight $w_p = 9.25$ and budget of $100."
+    )
+    result = safe_escape_latex_text(text)
+    assert r"$0.01$" in result
+    assert r"$5 \times 10^{-4}$" in result
+    assert r"$w_p = 9.25$" in result
+    assert r"\$100" in result
+

@@ -98,6 +98,70 @@ _HEX_COLOR_RE = re.compile(
 )
 
 
+_LATEX_N_COMMANDS = frozenset(
+    [
+        "newcommand",
+        "newenvironment",
+        "newline",
+        "noindent",
+        "nocite",
+        "normalsize",
+        "null",
+        "number",
+        "nabla",
+        "neq",
+        "neg",
+        "not",
+        "node",
+        "newfont",
+        "newcounter",
+        "newlength",
+        "newsavebox",
+        "newtheorem",
+        "ne",
+        "ni",
+        "notin",
+        "nu",
+        "natural",
+        "nearrow",
+        "nwarrow",
+    ]
+)
+
+_LATEX_T_COMMANDS = frozenset(
+    [
+        "textbf",
+        "textit",
+        "texttt",
+        "title",
+        "today",
+        "tiny",
+        "tableofcontents",
+        "tabular",
+        "theta",
+        "times",
+        "top",
+        "tau",
+        "text",
+        "textcolor",
+        "textbullet",
+        "textwidth",
+        "textheight",
+        "thanks",
+        "to",
+        "tilde",
+        "triangle",
+        "ttfamily",
+        "tabcolsep",
+        "theorem",
+        "the",
+        "thispagestyle",
+        "thicklines",
+        "thinlines",
+    ]
+)
+
+
 def _pre_escape_backslashes(raw: str) -> str:
     r"""Pre-process raw LLM text before JSON parse.
 
@@ -105,9 +169,10 @@ def _pre_escape_backslashes(raw: str) -> str:
     a JSON string literal. When inside a string:
     - Protect LaTeX line breaks: convert ``\\`` to ``\\\\`` so json.loads
       preserves ``\\`` instead of collapsing to single ``\``.
-    - Preserve ``\b``, ``\f``, ``\n``, ``\r``, ``\t`` when followed by
-      alpha characters (e.g. ``\begin``, ``\frac``, ``\resumeItem``) by
-      doubling the backslash.
+    - Preserve ``\b``, ``\f``, ``\r`` when followed by alpha characters
+      (e.g. ``\begin``, ``\frac``, ``\resumeItem``).
+    - Differentiate genuine JSON whitespace escapes (``\n``, ``\t``) from
+      LaTeX commands (``\newcommand``, ``\textbf``).
     - Double any backslash followed by non-JSON escape characters (e.g.
       ``\c``, ``\s``, ``\d``, ``\p``).
     """
@@ -151,14 +216,40 @@ def _pre_escape_backslashes(raw: str) -> str:
 
             # Case 2: Standard escapes: b, f, n, r, t
             if nxt in "bfnrt":
+                if nxt == "n":
+                    cmd_m = re.match(r"^[a-zA-Z]+", raw[i + 1 :])
+                    if cmd_m and cmd_m.group(0).lower() in _LATEX_N_COMMANDS:
+                        result.append("\\\\")
+                        result.append(nxt)
+                        i += 2
+                        continue
+                    # Genuine JSON newline (\n followed by text or space)
+                    result.append(ch)
+                    result.append(nxt)
+                    i += 2
+                    continue
+
+                if nxt == "t":
+                    cmd_m = re.match(r"^[a-zA-Z]+", raw[i + 1 :])
+                    if cmd_m and cmd_m.group(0).lower() in _LATEX_T_COMMANDS:
+                        result.append("\\\\")
+                        result.append(nxt)
+                        i += 2
+                        continue
+                    # Genuine JSON tab
+                    result.append(ch)
+                    result.append(nxt)
+                    i += 2
+                    continue
+
                 after = raw[i + 2] if i + 2 < n else ""
                 if after.isalpha():
-                    # LaTeX command (e.g. \begin, \frac, \resumeItem, \textbf)
+                    # LaTeX command (e.g. \begin, \frac, \resumeItem)
                     result.append("\\\\")
                     result.append(nxt)
                     i += 2
                     continue
-                # Genuine JSON whitespace escape (\n, \t, etc.)
+                # Genuine JSON whitespace escape (\b, \f, \r)
                 result.append(ch)
                 result.append(nxt)
                 i += 2
@@ -209,26 +300,64 @@ def _clean_backslash_typos(text: str) -> str:
 
 
 def _is_math_pair(text: str, start_idx: int) -> int:
-    """Return closing $ index if text[start_idx] starts math pair, else -1.
-    """
+    """Return closing $ index if text[start_idx] starts math pair, else -1."""
     if start_idx + 1 >= len(text):
         return -1
     next_ch = text[start_idx + 1]
-    if next_ch.isdigit() or next_ch in " \t\r\n.,;:)":
+    if next_ch in "\r\n.,;:)":
         return -1
-    eol = text.find("\n", start_idx)
-    limit = eol if eol != -1 else len(text)
-    close_idx = text.find("$", start_idx + 1, limit)
+
+    # Inline math cannot cross a blank line (paragraph break in TeX)
+    para_end = text.find("\n\n", start_idx)
+    limit = para_end if para_end != -1 else len(text)
+
+    search_from = start_idx + 1
+    close_idx = -1
+    while search_from < limit:
+        found = text.find("$", search_from, limit)
+        if found == -1:
+            break
+        # Ignore escaped \$
+        bs_count = 0
+        j = found - 1
+        while j >= 0 and text[j] == "\\":
+            bs_count += 1
+            j -= 1
+        if bs_count % 2 == 0:
+            close_idx = found
+            break
+        search_from = found + 1
+
     if close_idx == -1:
         return -1
-    if close_idx > 0 and text[close_idx - 1] == "\\":
-        return -1
+
     inner = text[start_idx + 1 : close_idx].strip()
-    # If inner looks like currency ($100k or $50 to $100), not math
-    if any(c.isdigit() for c in inner) and not any(
-        op in inner for op in "+-*/=^_\\{}<>"
+    if not inner:
+        return -1
+
+    # Currency ranges like $50-$100 or $50 to $100 or $50 and $100
+    if re.search(
+        r"^[\d,.]+\s*[kKmMbB]?\s*(?:to|and|-|–|—)\s*$", inner, re.IGNORECASE
     ):
         return -1
+
+    # Pure numbers (integer or decimal like 0.01, 3.14) are valid math mode
+    try:
+        float(inner.replace(",", ""))
+        return close_idx
+    except ValueError:
+        pass
+
+    # If inner has digits and lacks math operators or LaTeX commands,
+    # and contains words/spaces (e.g. "$50 per month$"), it is non-math text
+    has_math_indicator = (
+        any(op in inner for op in "+-*/=^_\\{}<>~")
+        or "\\" in inner
+        or inner.isalnum()
+    )
+    if any(c.isdigit() for c in inner) and not has_math_indicator:
+        return -1
+
     return close_idx
 
 
@@ -407,12 +536,13 @@ def safe_escape_latex_text(text: str) -> str:
         in_math_env = any(e in _MATH_ENVS for e in active_envs)
         in_tabular_env = any(e in _TABULAR_ENVS for e in active_envs)
 
-        # LaTeX comment: % to end of line ONLY if % is at start of line
+        # LaTeX comment: % to end of line
         if ch == "%":
             line_start = max(0, text.rfind("\n", 0, i))
             prefix_line = (
                 text[line_start + 1 : i] if "\n" in text[:i] else text[:i]
             )
+            # If at start of line (ignoring whitespace) -> comment
             if not prefix_line.strip():
                 eol = text.find("\n", i)
                 if eol == -1:
@@ -421,9 +551,21 @@ def safe_escape_latex_text(text: str) -> str:
                 result.append(text[i : eol + 1])
                 i = eol + 1
                 continue
-            # Inline percent in text (e.g. 50%, 100%, sales % increase)
-            result.append(r"\%")
-            i += 1
+            # If preceded by a digit (e.g. 50%, 100%, 9.76%) -> inline percent
+            prev_char = text[i - 1] if i > 0 else ""
+            if prev_char.isdigit() or (
+                prev_char in " \t" and i > 1 and text[i - 2].isdigit()
+            ):
+                result.append(r"\%")
+                i += 1
+                continue
+            # Otherwise it's a trailing comment on a line (e.g. \fancyhf{} % comment)
+            eol = text.find("\n", i)
+            if eol == -1:
+                result.append(text[i:])
+                break
+            result.append(text[i : eol + 1])
+            i = eol + 1
             continue
 
         # Ampersand: preserve in math envs and tabular envs

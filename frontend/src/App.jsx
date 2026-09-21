@@ -3,7 +3,8 @@ import axios from 'axios';
 import AceEditor from 'react-ace';
 import {
   Send, Download, Code2, Eye, RefreshCw, Plus, Trash2,
-  LogOut, User, X, FileText, Target, Layers, RotateCcw, GripVertical
+  LogOut, User, X, FileText, Target, Layers, RotateCcw, GripVertical,
+  ChevronLeft, ChevronRight
 } from 'lucide-react';
 
 import 'ace-builds/src-noconflict/mode-latex';
@@ -105,6 +106,13 @@ export default function App() {
   const [compatNote, setCompatNote] = useState('');
   const [autoSyncing, setAutoSyncing] = useState(false);
   const [streamProgress, setStreamProgress] = useState(''); // SSE zone progress
+  const [draggedZoneIndex, setDraggedZoneIndex] = useState(null);
+  const [dragOverZoneIndex, setDragOverZoneIndex] = useState(null);
+  const [showAddZoneModal, setShowAddZoneModal] = useState(false);
+  const [newZoneTitle, setNewZoneTitle] = useState('');
+  const [newZonePosition, setNewZonePosition] = useState('end');
+  const [newZoneSubmitting, setNewZoneSubmitting] = useState(false);
+  const [zoneActionNote, setZoneActionNote] = useState('');
   const chatEndRef = useRef(null);
   const pdfUrlRef = useRef('');
   const autoSyncSkipRef = useRef(false);
@@ -494,21 +502,130 @@ export default function App() {
   };
 
 
-  const addZone = async () => {
+  const reorderZones = async (newOrder) => {
+    if (!sessionId || setupMode || !newOrder?.length) return;
+    const zmap = Object.fromEntries(zoneCatalog.map((z) => [z.zone_no, z]));
+    const optimisticCatalog = newOrder.map((n) => zmap[n]).filter(Boolean);
+    setZoneCatalog(optimisticCatalog);
+    setZones(optimisticCatalog.map((z) => String(z.zone_no)));
+    setZoneActionNote('Reordering sections & compiling…');
+
+    try {
+      const resp = await axios.patch(`${API_BASE}/sessions/${sessionId}/zone-order`, {
+        zone_order: newOrder,
+      });
+      applyZoneState(resp.data.session, resp.data.latex_code);
+      if (resp.data.latex_code) {
+        await compileAndRender(resp.data.latex_code, sessionId, { quiet: true });
+      }
+    } catch (e) {
+      console.error('Reorder error:', e);
+      setCompileNote(errDetail(e, 'Failed to reorder sections'));
+      await hydrateSession(sessionId);
+    } finally {
+      setZoneActionNote('');
+    }
+  };
+
+  const moveZoneIndex = async (currentIndex, direction) => {
+    const targetIndex = currentIndex + direction;
+    if (targetIndex < 0 || targetIndex >= zoneCatalog.length) return;
+    const currentOrder = zoneCatalog.map((z) => z.zone_no);
+    const nextOrder = [...currentOrder];
+    const [moved] = nextOrder.splice(currentIndex, 1);
+    nextOrder.splice(targetIndex, 0, moved);
+    await reorderZones(nextOrder);
+  };
+
+  const handleZoneDragStart = (e, index) => {
+    setDraggedZoneIndex(index);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', String(index));
+  };
+
+  const handleZoneDragOver = (e, index) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (dragOverZoneIndex !== index) {
+      setDragOverZoneIndex(index);
+    }
+  };
+
+  const handleZoneDrop = async (e, dropIndex) => {
+    e.preventDefault();
+    const fromIndex = draggedZoneIndex;
+    setDraggedZoneIndex(null);
+    setDragOverZoneIndex(null);
+    if (fromIndex == null || fromIndex === dropIndex) return;
+
+    const currentOrder = zoneCatalog.map((z) => z.zone_no);
+    const nextOrder = [...currentOrder];
+    const [moved] = nextOrder.splice(fromIndex, 1);
+    nextOrder.splice(dropIndex, 0, moved);
+    await reorderZones(nextOrder);
+  };
+
+  const handleZoneDragEnd = () => {
+    setDraggedZoneIndex(null);
+    setDragOverZoneIndex(null);
+  };
+
+  const openAddZoneModal = () => {
     if (!sessionId || setupMode) return;
-    const desc = window.prompt('New zone description (e.g. Projects)', 'Projects');
-    if (!desc) return;
-    const resp = await axios.post(`${API_BASE}/sessions/${sessionId}/zones`, {
-      description: desc,
-    });
-    applyZoneState(resp.data.session, resp.data.latex_code);
+    setNewZoneTitle('');
+    setNewZonePosition('end');
+    setShowAddZoneModal(true);
+  };
+
+  const handleCreateZone = async (e) => {
+    e?.preventDefault();
+    if (!sessionId || !newZoneTitle.trim()) return;
+    setNewZoneSubmitting(true);
+    setZoneActionNote('Adding section & compiling…');
+    try {
+      let atStart = false;
+      let afterZoneNo = null;
+      if (newZonePosition === 'start') {
+        atStart = true;
+      } else if (newZonePosition.startsWith('after:')) {
+        afterZoneNo = parseInt(newZonePosition.split(':')[1], 10);
+      }
+      const payload = {
+        description: newZoneTitle.trim(),
+        at_start: atStart,
+        after_zone_no: afterZoneNo,
+      };
+      const resp = await axios.post(`${API_BASE}/sessions/${sessionId}/zones`, payload);
+      applyZoneState(resp.data.session, resp.data.latex_code);
+      setShowAddZoneModal(false);
+      setNewZoneTitle('');
+      setNewZonePosition('end');
+      if (resp.data.latex_code) {
+        await compileAndRender(resp.data.latex_code, sessionId, { quiet: false });
+      }
+    } catch (err) {
+      setCompileNote(errDetail(err, 'Failed to add section'));
+    } finally {
+      setNewZoneSubmitting(false);
+      setZoneActionNote('');
+    }
   };
 
   const removeZone = async (zoneNo) => {
     if (!sessionId || setupMode) return;
     if (!window.confirm(`Remove zone ${zoneNo}?`)) return;
-    const resp = await axios.delete(`${API_BASE}/sessions/${sessionId}/zones/${zoneNo}`);
-    applyZoneState(resp.data.session, resp.data.latex_code);
+    setZoneActionNote(`Removing zone ${zoneNo} & compiling…`);
+    try {
+      const resp = await axios.delete(`${API_BASE}/sessions/${sessionId}/zones/${zoneNo}`);
+      applyZoneState(resp.data.session, resp.data.latex_code);
+      if (resp.data.latex_code) {
+        await compileAndRender(resp.data.latex_code, sessionId, { quiet: true });
+      }
+    } catch (err) {
+      setCompileNote(errDetail(err, 'Failed to remove zone'));
+    } finally {
+      setZoneActionNote('');
+    }
   };
 
   useEffect(() => {
@@ -1297,41 +1414,110 @@ export default function App() {
 
           <div className="px-4 py-3 border-b border-ink-200 space-y-2">
             <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1.5 flex-wrap">
                 <p className="text-[11px] font-semibold text-ink-500 uppercase tracking-wider">Zones</p>
                 <span className="text-[10px] text-ink-400 font-medium">
                   ({zoneCatalog.length || zones.length})
                 </span>
+                {zoneActionNote && (
+                  <span className="text-[10px] text-accent animate-pulse font-medium">
+                    · {zoneActionNote}
+                  </span>
+                )}
               </div>
               <button
                 type="button"
-                onClick={addZone}
-                className="text-[11px] font-semibold text-accent hover:underline flex items-center gap-0.5"
+                onClick={openAddZoneModal}
+                className="text-[11px] font-semibold text-accent hover:underline flex items-center gap-0.5 cursor-pointer"
               >
                 <Plus size={12} /> Add zone
               </button>
             </div>
             {zoneCatalog.length > 0 ? (
-              <div className="flex flex-wrap gap-1.5">
-                {zoneCatalog.map((z) => {
+              <div className="flex flex-wrap gap-1.5 items-center">
+                {zoneCatalog.map((z, idx) => {
                   const isTarget = selectedTargetZone === String(z.zone_no) || selectedTargetZone === z.description;
+                  const isDragging = draggedZoneIndex === idx;
+                  const isDragOver = dragOverZoneIndex === idx;
                   return (
-                    <button
+                    <div
                       key={z.zone_no}
-                      type="button"
-                      title="Click to remove zone"
-                      onClick={() => removeZone(z.zone_no)}
-                      className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] transition-colors ${
-                        isTarget
+                      draggable={true}
+                      onDragStart={(e) => handleZoneDragStart(e, idx)}
+                      onDragOver={(e) => handleZoneDragOver(e, idx)}
+                      onDrop={(e) => handleZoneDrop(e, idx)}
+                      onDragEnd={handleZoneDragEnd}
+                      className={`group inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] transition-all select-none ${
+                        isDragging
+                          ? 'opacity-40 scale-95 border-dashed border-accent bg-accent/10 shadow-inner'
+                          : isDragOver
+                          ? 'ring-2 ring-accent ring-offset-1 border-accent bg-accent/20 shadow-sm'
+                          : isTarget
                           ? 'border-accent bg-accent/15 text-accent font-semibold shadow-2xs'
-                          : 'border-ink-200 bg-ink-50 text-ink-700 hover:border-red-300 hover:text-red-700'
+                          : 'border-ink-200 bg-ink-50 text-ink-700 hover:border-ink-400 hover:bg-white'
                       }`}
                     >
-                      <GripVertical size={9} className="opacity-40" />
-                      <span className="font-semibold">Z{z.zone_no}</span>
-                      <span className="truncate max-w-[8.5rem]">{z.description}</span>
-                      <X size={9} className="opacity-50 hover:opacity-100 ml-0.5" />
-                    </button>
+                      <span
+                        title="Drag to reorder"
+                        className="cursor-grab active:cursor-grabbing p-0.5 text-ink-400 hover:text-ink-700"
+                      >
+                        <GripVertical size={10} />
+                      </span>
+
+                      {/* Move left arrow button (visible on hover / focus) */}
+                      {idx > 0 && (
+                        <button
+                          type="button"
+                          title="Move left"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            moveZoneIndex(idx, -1);
+                          }}
+                          className="opacity-40 group-hover:opacity-100 hover:text-accent p-0.5 transition-opacity cursor-pointer"
+                        >
+                          <ChevronLeft size={10} />
+                        </button>
+                      )}
+
+                      {/* Clickable zone label to select as active target */}
+                      <button
+                        type="button"
+                        onClick={() => setSelectedTargetZone(String(z.zone_no))}
+                        title={`Select Zone ${z.zone_no} for targeted edits`}
+                        className="inline-flex items-center gap-1 cursor-pointer"
+                      >
+                        <span className="font-semibold text-ink-900">Z{z.zone_no}</span>
+                        <span className="truncate max-w-[7.5rem]">{z.description}</span>
+                      </button>
+
+                      {/* Move right arrow button (visible on hover / focus) */}
+                      {idx < zoneCatalog.length - 1 && (
+                        <button
+                          type="button"
+                          title="Move right"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            moveZoneIndex(idx, 1);
+                          }}
+                          className="opacity-40 group-hover:opacity-100 hover:text-accent p-0.5 transition-opacity cursor-pointer"
+                        >
+                          <ChevronRight size={10} />
+                        </button>
+                      )}
+
+                      {/* Remove zone button */}
+                      <button
+                        type="button"
+                        title={`Remove Zone ${z.zone_no}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeZone(z.zone_no);
+                        }}
+                        className="opacity-40 hover:opacity-100 hover:text-red-600 p-0.5 transition-colors ml-0.5 cursor-pointer"
+                      >
+                        <X size={10} />
+                      </button>
+                    </div>
                   );
                 })}
               </div>
@@ -1904,6 +2090,89 @@ export default function App() {
                 </div>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {showAddZoneModal && (
+        <div
+          className="fixed inset-0 z-50 bg-ink-950/40 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => !newZoneSubmitting && setShowAddZoneModal(false)}
+        >
+          <div
+            className="w-full max-w-md bg-white rounded-lg border border-ink-200 shadow-xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-4 border-b border-ink-200">
+              <div>
+                <h3 className="font-display text-base font-semibold text-ink-900">Add New Section</h3>
+                <p className="text-xs text-ink-500 mt-0.5">
+                  {documentMode === 'research_paper' ? 'Add an academic paper section' : 'Add a section to your resume'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => !newZoneSubmitting && setShowAddZoneModal(false)}
+                className="text-ink-400 hover:text-ink-900 p-1 cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateZone}>
+              <div className="p-5 space-y-4">
+                <label className="block space-y-1.5">
+                  <span className="text-xs font-medium text-ink-700">Section Title</span>
+                  <input
+                    type="text"
+                    required
+                    autoFocus
+                    placeholder={documentMode === 'research_paper' ? 'e.g. RELATED WORK, METHODOLOGY, ABLATION STUDY' : 'e.g. Projects, Certifications, Publications'}
+                    value={newZoneTitle}
+                    onChange={(e) => setNewZoneTitle(e.target.value)}
+                    className="w-full px-3 py-2 rounded-md border border-ink-200 text-sm outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+                  />
+                </label>
+
+                <label className="block space-y-1.5">
+                  <span className="text-xs font-medium text-ink-700">Placement in Document</span>
+                  <select
+                    value={newZonePosition}
+                    onChange={(e) => setNewZonePosition(e.target.value)}
+                    className="w-full px-3 py-2 rounded-md border border-ink-200 text-sm outline-none focus:border-accent focus:ring-1 focus:ring-accent bg-white"
+                  >
+                    <option value="end">At end (bottom)</option>
+                    <option value="start">At start (top)</option>
+                    {zoneCatalog.map((z) => (
+                      <option key={z.zone_no} value={`after:${z.zone_no}`}>
+                        After Z{z.zone_no}: {z.description}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-ink-400">
+                    The document layout will immediately re-assemble and compile to PDF.
+                  </p>
+                </label>
+              </div>
+
+              <div className="px-5 py-3 border-t border-ink-200 bg-ink-50/50 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  disabled={newZoneSubmitting}
+                  onClick={() => setShowAddZoneModal(false)}
+                  className="px-3 py-1.5 rounded-md border border-ink-200 text-xs font-medium text-ink-700 hover:bg-ink-100 disabled:opacity-40 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={newZoneSubmitting || !newZoneTitle.trim()}
+                  className="px-4 py-1.5 rounded-md bg-accent text-white text-xs font-semibold hover:bg-accent-mid disabled:opacity-40 flex items-center gap-1 cursor-pointer"
+                >
+                  {newZoneSubmitting ? 'Adding & Compiling…' : '+ Add Section'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

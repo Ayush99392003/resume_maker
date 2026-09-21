@@ -17,7 +17,7 @@ _PROVIDER_DOWN_RE = re.compile(
 from pydantic import BaseModel, Field
 
 try:
-    import core.research_agents
+    import core.research_agents as _research_agents  # noqa: F401
     from core.latex_sanitizer import safe_extract_json
     from core.logging_setup import get_logger
     from core.style_agent import style_agent
@@ -27,10 +27,7 @@ try:
         STYLE_TOOLS_DESCRIPTION,
     )
     from core.zone_agents import (
-        _clean_backslash_typos,
-        _escape_raw_latex_chars,
         _extract_delimited,
-        _pre_escape_backslashes,
         zone_agent_router,
     )
     from llm_router import ChatMessage, llm_router
@@ -64,6 +61,7 @@ class OrchStep(BaseModel):
     at_start: bool = False
     new_order: list[int] = Field(default_factory=list)
     swap: list[int] = Field(default_factory=list)
+    move: dict[str, Any] = Field(default_factory=dict)
 
 
 class OrchPlan(BaseModel):
@@ -238,58 +236,74 @@ def plan_intents(
                 api_key=api_key,
                 temperature=0.1,
             )
-            tool = (
-                str(data.get("tool") or "")
-                .replace(r"\_", "_")
-                .strip()
-                .lower()
-            )
-            raw_args = data.get("args") or {}
-            args = (
-                {
-                    str(k).replace(r"\_", "_"): v
-                    for k, v in raw_args.items()
-                }
-                if isinstance(raw_args, dict)
-                else {}
-            )
             reason = str(data.get("reason") or "structure_tool")
 
-            if tool == "add_zone":
-                title = str(args.get("title") or "Custom section")
-                after = args.get("after_zone_no")
-                at_start = bool(args.get("at_start"))
-                return OrchPlan(
-                    steps=[
+            # Support both single action and multiple actions
+            raw_actions = data.get("actions")
+            if not isinstance(raw_actions, list) or not raw_actions:
+                raw_actions = [data]
+
+            steps: list[OrchStep] = []
+            for act in raw_actions:
+                if not isinstance(act, dict):
+                    continue
+                tool = (
+                    str(act.get("tool") or "")
+                    .replace(r"\_", "_")
+                    .strip()
+                    .lower()
+                )
+                raw_args = act.get("args") or {}
+                args = (
+                    {
+                        str(k).replace(r"\_", "_"): v
+                        for k, v in raw_args.items()
+                    }
+                    if isinstance(raw_args, dict)
+                    else {}
+                )
+
+                if tool == "add_zone":
+                    title = str(args.get("title") or "Custom section")
+                    after = args.get("after_zone_no")
+                    at_start = bool(args.get("at_start"))
+                    steps.append(
                         OrchStep(
                             intent="add_zone",
                             description=title,
                             after_zone_no=after,
                             at_start=at_start,
                         )
-                    ],
-                    reason=reason,
-                )
-            elif tool == "remove_zone":
-                zone_nos = [int(x) for x in (args.get("zone_nos") or [])]
-                if not zone_nos:
-                    return OrchPlan(
-                        clarify="Which zone should I remove?",
-                        reason="remove_unclear",
                     )
+                elif tool == "remove_zone":
+                    zone_nos = [int(x) for x in (args.get("zone_nos") or [])]
+                    if zone_nos:
+                        steps.append(
+                            OrchStep(intent="remove_zone", zone_nos=zone_nos)
+                        )
+                elif tool == "reorder_zones":
+                    swap = [int(x) for x in (args.get("swap") or [])]
+                    new_order = [int(x) for x in (args.get("new_order") or [])]
+                    raw_move = args.get("move")
+                    move_dict = raw_move if isinstance(raw_move, dict) else {}
+                    steps.append(
+                        OrchStep(
+                            intent="reorder",
+                            swap=swap,
+                            new_order=new_order,
+                            move=move_dict,
+                        )
+                    )
+
+            if not steps:
                 return OrchPlan(
-                    steps=[OrchStep(intent="remove_zone", zone_nos=zone_nos)],
-                    reason=reason,
+                    clarify=(
+                        "Could you clarify how you'd like to adjust the "
+                        "sections?"
+                    ),
+                    reason="structure_unclear",
                 )
-            elif tool == "reorder_zones":
-                swap = [int(x) for x in (args.get("swap") or [])]
-                new_order = [int(x) for x in (args.get("new_order") or [])]
-                return OrchPlan(
-                    steps=[
-                        OrchStep(intent="reorder", swap=swap, new_order=new_order)
-                    ],
-                    reason=reason,
-                )
+            return OrchPlan(steps=steps, reason=reason)
 
         elif category == "content":
             # Content Branch: Target specific zone content or bio fill
@@ -751,7 +765,48 @@ class Orchestrator:
 
             if intent == "reorder":
                 try:
-                    if len(step.swap) == 2:
+                    if step.move:
+                        z_raw = step.move.get("zone_no")
+                        z_no: int | None = None
+                        if isinstance(z_raw, int):
+                            z_no = z_raw
+                        elif isinstance(z_raw, str):
+                            if z_raw.strip().isdigit():
+                                z_no = int(z_raw.strip())
+                            else:
+                                z_no = _match_zone_by_text(doc, z_raw)
+
+                        if z_no is not None and z_no in doc.zone_map():
+                            to_pos = step.move.get("to_position")
+                            after_z = step.move.get("after_zone_no")
+                            before_z = step.move.get("before_zone_no")
+                            t_idx = (
+                                (int(to_pos) - 1)
+                                if to_pos is not None
+                                else None
+                            )
+                            doc.move(
+                                z_no,
+                                before=(
+                                    int(before_z)
+                                    if before_z is not None
+                                    else None
+                                ),
+                                after=(
+                                    int(after_z)
+                                    if after_z is not None
+                                    else None
+                                ),
+                                target_index=t_idx,
+                            )
+                            summaries.append(
+                                f"Moved zone {z_no} in document order"
+                            )
+                        else:
+                            summaries.append(
+                                f"Zone {z_raw} not found for move"
+                            )
+                    elif len(step.swap) == 2:
                         doc.swap(step.swap[0], step.swap[1])
                         summaries.append(
                             f"Swapped zone {step.swap[0]} and {step.swap[1]}"
@@ -843,6 +898,7 @@ class Orchestrator:
                             full_digest=compact_digest,
                             user_message=user_message,
                             is_initial=(op_intent == "fill"),
+                            document_mode=getattr(doc, "document_mode", "resume"),
                             provider=provider,
                             model=model,
                             api_key=api_key,

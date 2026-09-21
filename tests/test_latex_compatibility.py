@@ -117,6 +117,49 @@ def test_math_handler_repair():
     assert "\\usepackage{amsmath,amssymb,mathtools}" in new_src
 
 
+def test_math_handler_does_not_trigger_on_package_loading_banners():
+    """Tectonic loading banners like (mathtools.sty) must not trigger math repair."""
+    from core.latex_compatibility import MathHandler
+
+    log_with_banners = (
+        "(mathtools.sty (calc.sty) (mhsetup.sty))\n"
+        "(amssymb.sty (amsfonts.sty))\n"
+        "! Missing } inserted.\n"
+        "l.43 \\begin{abstract}\n"
+    )
+    assert not MathHandler.is_math_error(log_with_banners)
+    assert ErrorClassifier.classify(log_with_banners) != "math"
+
+
+def test_math_handler_inject_does_not_duplicate_existing_packages():
+    """Existing comma-separated packages must be detected to avoid duplicates."""
+    from core.latex_compatibility import MathHandler
+
+    src = (
+        "\\documentclass{article}\n"
+        "\\usepackage{amsmath,amssymb}\n"
+        "\\begin{document}\n"
+        "\\end{document}"
+    )
+    new_src, act = MathHandler.inject_math_packages(src)
+    assert act is not None
+    # Only mathtools should be added
+    assert act["action"] == "injected \\usepackage{mathtools}"
+    assert new_src.count("amsmath") == 1
+    assert new_src.count("amssymb") == 1
+
+    # If all 3 are present, no action
+    src_all = (
+        "\\documentclass{article}\n"
+        "\\usepackage{amsmath,amssymb,mathtools}\n"
+        "\\begin{document}\n"
+        "\\end{document}"
+    )
+    new_src_all, act_none = MathHandler.inject_math_packages(src_all)
+    assert act_none is None
+    assert new_src_all == src_all
+
+
 def test_table_handler_repair():
     from core.latex_compatibility import TableHandler
 
@@ -176,3 +219,88 @@ def test_error_classifier_prioritizes_fatal_over_warning():
         "! Undefined control sequence. l.25 \\toprule\n"
     )
     assert ErrorClassifier.classify(mixed_log) == "table"
+
+
+def test_math_handler_repair_missing_dollar():
+    from core.latex_compatibility import MathHandler
+
+    log_text = (
+        "! Missing $ inserted.\n"
+        "<inserted text>\n"
+        "                $\n"
+        "l.171 ...decay of \\$5 \\times 10\\^{-4}\\$. To account ...\n"
+    )
+    assert MathHandler.is_math_error(log_text)
+    assert ErrorClassifier.classify(log_text) == "math"
+
+    src = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "weight decay of \\$5 \\times 10\\^{-4}\\$.\n"
+        "\\end{document}"
+    )
+    new_src, act = MathHandler.repair_math(src, log_text)
+    assert act is not None
+    assert "$5 \\times 10^{-4}$" in new_src
+    assert "\\$5" not in new_src
+
+
+def test_math_handler_repair_extra_rbrace_forgotten_dollar():
+    from core.latex_compatibility import MathHandler
+
+    log_text = (
+        "! Extra }, or forgotten $.\n"
+        "<template> \\unskip \\hfil }\n"
+        "                          \\hskip\n"
+        "\\tabcolsep \\endtemplate\n"
+        "l.120 Licit (\\$0$)    &\n"
+    )
+    assert MathHandler.is_math_error(log_text)
+    assert ErrorClassifier.classify(log_text) == "math"
+
+    src = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "\\begin{tabular}{lrr}\n"
+        "Licit (\\$0$) & 42,019 & 20.62\\% \\\\\n"
+        "\\end{tabular}\n"
+        "\\end{document}"
+    )
+    new_src, act = MathHandler.repair_math(src, log_text)
+    assert act is not None
+    assert "($0$)" in new_src
+    assert "\\$0$" not in new_src
+
+
+def test_math_handler_repair_missing_brace():
+    import re
+
+    from core.latex_compatibility import MathHandler
+
+    log_text = (
+        "! Missing } inserted.\n"
+        "<inserted text>\n"
+        "                }\n"
+        "l.110 \\end{align}\n"
+    )
+    assert MathHandler.is_math_error(log_text)
+    assert ErrorClassifier.classify(log_text) == "math"
+
+    src = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "\\begin{align}\n"
+        "\\mathcal{L} = -\\sum_{i=1}^N {y_i \\log(\\hat{y}_i)\n"
+        "\\end{align}\n"
+        "\\end{document}"
+    )
+    new_src, act = MathHandler.repair_math(src, log_text)
+    assert act is not None
+    assert "}" in act["action"]
+    # Verify braces are now balanced in the align environment
+    align_match = re.search(
+        r"\\begin\{align\}(.*?)\\end\{align\}", new_src, re.DOTALL
+    )
+    assert align_match is not None
+    body = align_match.group(1)
+    assert body.count("{") == body.count("}")

@@ -75,12 +75,16 @@ _ZONE_START = re.compile(
 _BEGIN_DOC = re.compile(r"\\begin\{document\}", re.IGNORECASE)
 _END_DOC = re.compile(r"\\end\{document\}", re.IGNORECASE)
 
+from typing import Any
+
 _HEADING_PAT = re.compile(
     r"^[ \t]*("
-    r"\\(?:section|subsection|cvsection)\*?\{"
-    r"|\\begin\{(?:abstract|IEEEkeywords|keywords|thebibliography)\}"
+    r"\\(?:section|subsection|subsubsection|paragraph|cvsection)\*?\{"
+    r"|\\begin\{(?:abstract|IEEEkeywords|keywords|thebibliography|rSection)\}"
     r"|\\appendix\b"
     r"|\\bibliography\{"
+    r"|\\title\{"
+    r"|\\name\{"
     r")",
     re.MULTILINE,
 )
@@ -136,32 +140,145 @@ def _split_shell(latex: str) -> tuple[str, str, str]:
     return header, body, footer
 
 
-def _description_for(name: str, body: str) -> str:
+def _description_for(
+    name: str,
+    body: str,
+    existing_desc: str | None = None,
+) -> str:
     key = name.upper()
     if key in DESC_FROM_NAME:
         return DESC_FROM_NAME[key]
+
+    if existing_desc and not re.match(
+        r"^Zone\s*\d+$", existing_desc.strip(), re.IGNORECASE
+    ):
+        return existing_desc.strip()
+
     if key.isdigit():
-        m = re.search(r"\\(?:section|section\*|cvsection)\*?\{", body)
+        # Title, authors, maketitle in academic papers
+        if (
+            r"\title" in body
+            or r"\maketitle" in body
+            or (r"\author" in body and r"\begin{document}" not in body)
+        ):
+            return "Title and authors"
+
+        # Resume name / contact header
+        if r"\name{" in body or (
+            r"\address{" in body and r"\title" not in body
+        ):
+            return "Name, contact, links"
+
+        # Headings: section, subsection, subsubsection, paragraph, cvsection, rSection
+        m = re.search(
+            r"(?:\\(?:section|subsection|subsubsection|paragraph|cvsection)\*?\{|\\begin\{rSection\}\{)",
+            body,
+        )
         if m:
             res = _extract_balanced_braces(body, m.start())
             if res:
                 clean = _clean_latex_title(res[0])
                 if clean:
+                    if (
+                        "index term" in clean.lower()
+                        or "keyword" in clean.lower()
+                    ):
+                        return "Index Terms"
                     return clean
-        if "\\begin{abstract}" in body:
+
+        # Academic environments
+        if r"\begin{abstract}" in body:
             return "Abstract"
-        if "\\begin{IEEEkeywords}" in body or "\\begin{keywords}" in body:
-            return "Keywords / Index terms"
-        if "\\begin{thebibliography}" in body or "\\bibliography{" in body:
+        if (
+            r"\begin{IEEEkeywords}" in body
+            or r"\begin{keywords}" in body
+            or "index term" in body.lower()
+            or "keywords" in body.lower()
+        ):
+            return "Index Terms"
+        if r"\begin{thebibliography}" in body or r"\bibliography{" in body:
             return "References"
-        if "\\appendix" in body:
+        if r"\appendix" in body:
             return "Appendix"
+
+        # Resume contact indicators
+        if r"\href{mailto:" in body or "@" in body:
+            return "Name, contact, links"
+
+        # Fallback to bold heading if present near top of block
+        m_bf = re.search(r"\\textbf\{", body)
+        if m_bf and m_bf.start() < 120:
+            res = _extract_balanced_braces(body, m_bf.start())
+            if res:
+                clean = _clean_latex_title(res[0])
+                if clean and len(clean) < 40:
+                    return clean
+
         return f"Zone {key}"
+
     return name.replace("_", " ").title()
 
 
-def _kind_for(name: str) -> str:
-    return KIND_HINTS.get(name.upper(), "custom")
+def _kind_for(name: str, body: str = "", desc: str = "") -> str:
+    key = name.upper()
+    if key in KIND_HINTS:
+        return KIND_HINTS[key]
+
+    desc_lower = (desc or "").lower()
+    body_lower = (body or "").lower()
+
+    if "title" in desc_lower or r"\title" in body or r"\maketitle" in body:
+        return "predefined_title_authors"
+    if "abstract" in desc_lower or r"\begin{abstract}" in body:
+        return "predefined_abstract"
+    if (
+        "index term" in desc_lower
+        or "keyword" in desc_lower
+        or r"\begin{ieeekeywords}" in body_lower
+        or r"\begin{keywords}" in body_lower
+    ):
+        return "predefined_keywords"
+    if (
+        "reference" in desc_lower
+        or "bibliography" in desc_lower
+        or r"\begin{thebibliography}" in body
+        or r"\bibliography{" in body
+    ):
+        return "predefined_references"
+    if "introduction" in desc_lower:
+        return "predefined_introduction"
+    if "related work" in desc_lower:
+        return "predefined_related_work"
+    if "methodology" in desc_lower or "system architecture" in desc_lower:
+        return "predefined_methodology"
+    if "experiment" in desc_lower or "evaluation" in desc_lower:
+        return "predefined_experiments"
+    if "discussion" in desc_lower:
+        return "predefined_discussion"
+    if "conclusion" in desc_lower:
+        return "predefined_conclusion"
+    if "appendix" in desc_lower or r"\appendix" in body:
+        return "predefined_appendix"
+
+    # Resume kinds
+    if "header" in desc_lower or "contact" in desc_lower or r"\name{" in body:
+        return "predefined_header"
+    if "summary" in desc_lower:
+        return "predefined_summary"
+    if "experience" in desc_lower:
+        return "predefined_experience"
+    if "education" in desc_lower:
+        return "predefined_education"
+    if "skill" in desc_lower:
+        return "predefined_skills"
+    if "project" in desc_lower:
+        return "predefined_projects"
+    if "certification" in desc_lower:
+        return "predefined_certifications"
+    if "publication" in desc_lower:
+        return "predefined_publications"
+
+    return "custom"
 
 
 def _segments_from_markers(body: str) -> list[tuple[str, str, str]]:
@@ -220,7 +337,11 @@ def _segments_from_sections(body: str) -> list[tuple[str, str, str]]:
         block = body[start:end].strip()
         matched_str = m.group(1).strip()
 
-        if "\\begin{abstract}" in matched_str:
+        if "\\title{" in matched_str:
+            clean = "TITLE_AUTHORS"
+        elif "\\name{" in matched_str:
+            clean = "HEADER"
+        elif "\\begin{abstract}" in matched_str:
             clean = "ABSTRACT"
         elif (
             "\\begin{IEEEkeywords}" in matched_str
@@ -249,6 +370,7 @@ def latex_to_zones(
     latex: str,
     *,
     source_url: str | None = None,
+    existing_zones: list[Any] | None = None,
 ) -> ZoneDocument:
     """Split built LaTeX into fixed header/footer + numbered zones."""
     log.info(
@@ -276,6 +398,24 @@ def latex_to_zones(
         segments = [("1", "", body.strip() or "% empty body")]
         mode = "fallback"
 
+    existing_descs: dict[int, str] = {}
+    existing_kinds: dict[int, str] = {}
+    if existing_zones:
+        for z in existing_zones:
+            if isinstance(z, dict):
+                z_no = z.get("zone_no")
+                z_desc = z.get("description")
+                z_kind = z.get("kind")
+            else:
+                z_no = getattr(z, "zone_no", None)
+                z_desc = getattr(z, "description", None)
+                z_kind = getattr(z, "kind", None)
+            if z_no is not None:
+                if z_desc:
+                    existing_descs[z_no] = str(z_desc)
+                if z_kind:
+                    existing_kinds[z_no] = str(z_kind)
+
     zones: list[ZoneRecord] = []
     order: list[int] = []
     for idx, (name, leading, inner) in enumerate(segments, start=1):
@@ -284,8 +424,13 @@ def latex_to_zones(
         )
         if not combined:
             combined = "% empty zone"
-        desc = _description_for(name, combined)
-        kind = _kind_for(name)
+
+        target_no = int(name) if name.isdigit() else idx
+        prev_desc = existing_descs.get(target_no)
+        desc = _description_for(name, combined, existing_desc=prev_desc)
+        kind = existing_kinds.get(target_no) or _kind_for(
+            name, combined, desc=desc
+        )
         latex_block = (
             f"% ZONE:{idx}:START\n{combined}\n% ZONE:{idx}:END\n"
         )
@@ -313,3 +458,4 @@ def latex_to_zones(
         next_zone_no=len(zones) + 1,
         source_url=source_url,
     )
+

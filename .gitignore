@@ -19,7 +19,7 @@ ruff_fixed.txt
 # Durable chat sessions and local profile data
 backend/data/
 data/
-
+scratch
 # Local Tectonic binary & font configs (downloadable/generated)
 backend/bin/
 backend/etc/

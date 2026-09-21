@@ -277,6 +277,13 @@ class ZoneOrderRequest(BaseModel):
     zone_order: list[int]
 
 
+class MoveZoneRequest(BaseModel):
+    zone_no: int
+    before_zone_no: int | None = None
+    after_zone_no: int | None = None
+    target_index: int | None = None
+
+
 class ChatRequest(BaseModel):
     session_id: str
     message: str
@@ -1375,7 +1382,11 @@ async def create_session(
     # Keep session latex aligned with softened/shell-fixed source
     if assembled != doc.assemble():
         try:
-            doc = latex_to_zones(assembled, source_url=doc.source_url)
+            doc = latex_to_zones(
+                assembled,
+                source_url=doc.source_url,
+                existing_zones=doc.zones,
+            )
         except Exception:
             pass
 
@@ -1509,20 +1520,25 @@ async def add_session_zone(
     doc = document_from_session(session) or latex_to_zones(
         session.latex_code
         or template_manager.get_template(session.template_name)
-        or ""
+        or "",
+        existing_zones=session.zones,
     )
-    inner = req.latex_inner or (
-        f"\\section*{{{req.description}}}\n% TODO"
-    )
+    mode = getattr(session, "document_mode", "resume")
     rec = doc.add_zone(
         description=req.description,
-        latex_inner=inner,
+        latex_inner=req.latex_inner or "",
         after_zone_no=req.after_zone_no,
         at_start=req.at_start,
+        document_mode=mode,
     )
     sync_session_from_document(session, doc)
     session_store.save(session)
-    log.info("zones.add.step: ok zone_no=%s order=%s", rec.zone_no, doc.zone_order)
+    log.info(
+        "zones.add.step: ok zone_no=%s order=%s mode=%s",
+        rec.zone_no,
+        doc.zone_order,
+        mode,
+    )
     return {
         "zone": rec.model_dump(),
         "catalog": doc.catalog(),
@@ -1596,6 +1612,55 @@ async def patch_zone_order(
     sync_session_from_document(session, doc)
     session_store.save(session)
     log.info("zones.order.step: ok order=%s", doc.zone_order)
+    return {
+        "zone_order": doc.zone_order,
+        "catalog": doc.catalog(),
+        "latex_code": session.latex_code,
+        "session": session.model_dump(),
+    }
+
+
+@app.post("/sessions/{session_id}/zones/move")
+async def move_session_zone(
+    session_id: str,
+    req: MoveZoneRequest,
+    authorization: str | None = Header(default=None),
+):
+    session = session_store.get(session_id)
+    if not session:
+        log.error("zones.move: session not found id=%s", session_id)
+        raise HTTPException(status_code=404, detail="Session not found")
+    user = _get_current_user(
+        authorization, required=config.REQUIRE_AUTH_FOR_SESSIONS
+    )
+    _check_session_access(session, user)
+    doc = document_from_session(session)
+    if doc is None:
+        log.error("zones.move: no zone document id=%s", session_id)
+        raise HTTPException(
+            status_code=400, detail="Session has no zone document"
+        )
+    log.info(
+        "zones.move.step: id=%s zone=%s target_index=%s before=%s after=%s",
+        session_id,
+        req.zone_no,
+        req.target_index,
+        req.before_zone_no,
+        req.after_zone_no,
+    )
+    try:
+        doc.move(
+            req.zone_no,
+            before=req.before_zone_no,
+            after=req.after_zone_no,
+            target_index=req.target_index,
+        )
+    except KeyError as e:
+        log.error("zones.move.error: %s", e)
+        raise HTTPException(status_code=400, detail=str(e))
+    sync_session_from_document(session, doc)
+    session_store.save(session)
+    log.info("zones.move.step: ok order=%s", doc.zone_order)
     return {
         "zone_order": doc.zone_order,
         "catalog": doc.catalog(),
@@ -1704,7 +1769,11 @@ async def put_session_latex(
     # Re-sync zone JSON when a full document is saved from the editor
     if "\\begin{document}" in latex:
         try:
-            doc = latex_to_zones(latex, source_url=session.source_url)
+            doc = latex_to_zones(
+                latex,
+                source_url=session.source_url,
+                existing_zones=session.zones,
+            )
             sync_session_from_document(session, doc)
             session_store.save(session)
             log.info(
