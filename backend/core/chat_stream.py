@@ -21,7 +21,8 @@ import asyncio
 import json
 import queue
 import threading
-from typing import Any, AsyncGenerator, Dict, Optional
+from collections.abc import AsyncGenerator
+from typing import Any
 
 from core.logging_setup import get_logger
 
@@ -43,10 +44,10 @@ async def stream_chat_turn(
     document,               # ZoneDocument
     user_message: str,
     is_first_fill: bool,
-    target_zone: Optional[str],
-    provider: Optional[str],
-    model: Optional[str],
-    api_key: Optional[str],
+    target_zone: str | None,
+    provider: str | None,
+    model: str | None,
+    api_key: str | None,
     # post-orchestration callback (compile + session save) —
     # called with OrchResult and returns the final response dict
     finalize_fn,

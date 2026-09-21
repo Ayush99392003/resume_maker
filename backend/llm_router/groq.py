@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import os
-from typing import Any, List, Optional, Type
+from typing import Any
+
 from pydantic import BaseModel
 
 from .base import ChatMessage, LLMProvider, LLMResponse
-
 
 _MODEL_ALIASES: dict[str, str] = {
     "llama-3.3-70b-versatile": "openai/gpt-oss-120b",
@@ -20,7 +20,7 @@ _MODEL_ALIASES: dict[str, str] = {
 class GroqProvider(LLMProvider):
     name = "groq"
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: str | None = None):
         self.api_key = api_key or os.getenv("GROQ_API_KEY")
         self._client: Any = None
 
@@ -46,11 +46,11 @@ class GroqProvider(LLMProvider):
 
     def chat(
         self,
-        messages: List[ChatMessage],
+        messages: list[ChatMessage],
         *,
         model: str,
         temperature: float = 0.4,
-        response_format: Optional[str] = None,
+        response_format: str | None = None,
     ) -> LLMResponse:
         resolved_model = _MODEL_ALIASES.get(model, model)
         kwargs = {
@@ -100,8 +100,8 @@ class GroqProvider(LLMProvider):
 
     def chat_model(
         self,
-        messages: List[ChatMessage],
-        response_model: Type[BaseModel],
+        messages: list[ChatMessage],
+        response_model: type[BaseModel],
         *,
         model: str,
         temperature: float = 0.4,

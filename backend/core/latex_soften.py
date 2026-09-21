@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from typing import List, Tuple
 
 try:
     from core.logging_setup import get_logger
@@ -18,8 +17,6 @@ _CRASHY_PACKAGES = (
     "fontawesome",
     "FiraMono",
     "contour",
-    "fontspec",
-    "unicode-math",
 )
 
 _PKG_LINE = re.compile(
@@ -46,7 +43,7 @@ _ICON_REPLACEMENTS = [
 _SIMPLE_MYULINE = r"\newcommand{\myuline}[1]{\textbf{#1}}"
 
 
-def _replace_newcommand_body(src: str, macroname: str, new_def: str) -> Tuple[str, bool]:
+def _replace_newcommand_body(src: str, macroname: str, new_def: str) -> tuple[str, bool]:
     """
     Replace \\newcommand{\\macroname}[n]{...} using brace-balanced matching.
     Avoids the classic bug where a non-greedy regex stops at the first '}'.
@@ -80,7 +77,7 @@ def _replace_newcommand_body(src: str, macroname: str, new_def: str) -> Tuple[st
     return src, False
 
 
-def soften_latex_for_tectonic(latex: str) -> Tuple[str, List[str]]:
+def soften_latex_for_tectonic(latex: str) -> tuple[str, list[str]]:
     """
     Disable packages that commonly crash this Tectonic Windows build
     and replace FA icons with text.
@@ -88,11 +85,26 @@ def soften_latex_for_tectonic(latex: str) -> Tuple[str, List[str]]:
     Returns (softened_latex, list of human-readable change notes).
     """
     src = latex or ""
-    changes: List[str] = []
+    changes: list[str] = []
     if not src.strip():
         return src, changes
 
-    disabled: List[str] = []
+    # Pass options to xcolor before \documentclass to prevent option clashes
+    if not re.search(r"\\PassOptionsToPackage\{[^}]*\}\{xcolor\}", src):
+        doc_match = re.search(r"^[ \t]*\\documentclass", src, re.MULTILINE)
+        if doc_match:
+            pass_opt = (
+                "\\PassOptionsToPackage"
+                "{dvipsnames,svgnames,x11names}{xcolor}\n"
+            )
+            src = (
+                src[: doc_match.start()]
+                + pass_opt
+                + src[doc_match.start() :]
+            )
+            changes.append("added \\PassOptionsToPackage for xcolor")
+
+    disabled: list[str] = []
 
     # ------------------------------------------------------------------ #
     # pdfTeX-only primitives — Tectonic uses XeTeX so these always crash. #
@@ -242,16 +254,73 @@ def soften_latex_for_tectonic(latex: str) -> Tuple[str, List[str]]:
         src = src[: m.start()] + inner + src[text_end + 1 :]
         changes.append("stripped \\contour{...}{text}")
 
-    # fontspec / unicode-math leftover commands (noop-ish stubs)
-    for cmd, note in [
-        (r"\\setmainfont(?:\[[^\]]*\])?\{[^}]*\}", "removed \\setmainfont"),
-        (r"\\setsansfont(?:\[[^\]]*\])?\{[^}]*\}", "removed \\setsansfont"),
-        (r"\\setmonofont(?:\[[^\]]*\])?\{[^}]*\}", "removed \\setmonofont"),
-    ]:
-        src2, n = re.subn(cmd, "% fontspec cmd removed", src)
-        if n:
-            src = src2
-            changes.append(note)
+    # ------------------------------------------------------------------ #
+    # Font remapping: map non-standard fonts to TeX Gyre instead of      #
+    # stripping \setmainfont / \setsansfont / \setmonofont declarations. #
+    # ------------------------------------------------------------------ #
+    _STANDARD_FONTS = frozenset(
+        [
+            "tex gyre termes",
+            "tex gyre heros",
+            "tex gyre cursor",
+            "tex gyre pagella",
+            "tex gyre bonum",
+            "tex gyre schola",
+            "tex gyre adventor",
+            "times new roman",
+            "arial",
+            "helvetica",
+            "courier new",
+            "consolas",
+            "georgia",
+            "verdana",
+            "calibri",
+            "cambria",
+            "dejavu sans",
+            "liberation sans",
+            "latin modern roman",
+            "latin modern sans",
+            "latin modern mono",
+        ]
+    )
+
+    def _remap_font(match: re.Match) -> str:
+        cmd = match.group(1)
+        opts = match.group(2) or ""
+        fname = match.group(3).strip()
+        low = fname.lower()
+        if low in _STANDARD_FONTS:
+            return match.group(0)
+
+        # Classify font family
+        if "sans" in cmd.lower() or any(
+            k in low
+            for k in (
+                "sans",
+                "helvetica",
+                "arial",
+                "roboto",
+                "lato",
+                "montserrat",
+            )
+        ):
+            fallback = "TeX Gyre Heros"
+        elif "mono" in cmd.lower() or any(
+            k in low
+            for k in ("mono", "code", "courier", "fira", "consolas")
+        ):
+            fallback = "TeX Gyre Cursor"
+        else:
+            fallback = "TeX Gyre Termes"
+
+        changes.append(f"mapped non-standard font '{fname}' -> '{fallback}'")
+        return f"{cmd}{opts}{{{fallback}}}"
+
+    _FONT_CMD_RE = re.compile(
+        r"(\\(?:setmainfont|setsansfont|setmonofont))"
+        r"([ \t]*\[[^\]]*\])?[ \t]*\{([^}]+)\}"
+    )
+    src = _FONT_CMD_RE.sub(_remap_font, src)
 
     for a, b in _ICON_REPLACEMENTS:
         if a in src:
@@ -391,11 +460,16 @@ def soften_latex_for_tectonic(latex: str) -> Tuple[str, List[str]]:
             src = src.replace(uc, rep)
             changes.append(f"normalized unicode {hex(ord(uc))} -> {rep}")
 
-    # Auto-escape bare currency dollar signs like $100k, $50, $85,000
-    src2, n_curr = re.subn(r"(?<!\\)\$(?=\d)", r"\$", src)
-    if n_curr:
+    # Auto-escape bare currency dollar signs without mangling math mode
+    try:
+        from core.latex_sanitizer import safe_escape_latex_text
+    except ImportError:
+        from .latex_sanitizer import safe_escape_latex_text  # type: ignore
+
+    src2 = safe_escape_latex_text(src)
+    if src2 != src:
         src = src2
-        changes.append("escaped raw currency dollar signs ($ -> \\$)")
+        changes.append("escaped raw currency/special characters")
 
     # Clean up lonely line-break \\ that trigger "There's no line here to end"
     src2, n_lb = re.subn(r"(?m)^\s*\\\\(?:\s*\[[^\]]*\])?\s*$", "", src)

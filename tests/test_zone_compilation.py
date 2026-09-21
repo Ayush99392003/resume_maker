@@ -4,15 +4,16 @@ import json
 import os
 import sys
 from pathlib import Path
+
 import pytest
 
 BACKEND = Path(__file__).resolve().parents[1] / "backend"
 sys.path.insert(0, str(BACKEND))
 
-from core.templates import template_manager  # noqa: E402
-from core.compiler import compiler  # noqa: E402
-from core.zone_agents import zone_agent_router  # noqa: E402
-from core.zones import zone_engine  # noqa: E402
+from core.compiler import compiler
+from core.templates import template_manager
+from core.zone_agents import zone_agent_router
+from core.zones import zone_engine
 
 
 def _load_groq_api_key() -> str:

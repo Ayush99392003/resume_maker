@@ -3,7 +3,8 @@ import axios from 'axios';
 import AceEditor from 'react-ace';
 import {
   Send, Download, Code2, Eye, RefreshCw, Plus, Trash2,
-  LogOut, User, X, FileText, Target, Layers, RotateCcw, GripVertical
+  LogOut, User, X, FileText, Target, Layers, RotateCcw, GripVertical,
+  ChevronLeft, ChevronRight
 } from 'lucide-react';
 
 import 'ace-builds/src-noconflict/mode-latex';
@@ -92,6 +93,8 @@ export default function App() {
   const [provider, setProvider] = useState('groq');
   const [model, setModel] = useState('openai/gpt-oss-120b');
   const [providerInfo, setProviderInfo] = useState(null);
+  // Document mode: resume vs research_paper
+  const [documentMode, setDocumentMode] = useState(() => localStorage.getItem('rm_document_mode') || 'resume');
   // New-chat setup state
   const [setupMode, setSetupMode] = useState(false);
   const [setupLatexPaste, setSetupLatexPaste] = useState('');
@@ -103,6 +106,13 @@ export default function App() {
   const [compatNote, setCompatNote] = useState('');
   const [autoSyncing, setAutoSyncing] = useState(false);
   const [streamProgress, setStreamProgress] = useState(''); // SSE zone progress
+  const [draggedZoneIndex, setDraggedZoneIndex] = useState(null);
+  const [dragOverZoneIndex, setDragOverZoneIndex] = useState(null);
+  const [showAddZoneModal, setShowAddZoneModal] = useState(false);
+  const [newZoneTitle, setNewZoneTitle] = useState('');
+  const [newZonePosition, setNewZonePosition] = useState('end');
+  const [newZoneSubmitting, setNewZoneSubmitting] = useState(false);
+  const [zoneActionNote, setZoneActionNote] = useState('');
   const chatEndRef = useRef(null);
   const pdfUrlRef = useRef('');
   const autoSyncSkipRef = useRef(false);
@@ -319,6 +329,10 @@ export default function App() {
     } else {
       setCompatNote('');
     }
+    if (s.document_mode) {
+      setDocumentMode(s.document_mode);
+      localStorage.setItem('rm_document_mode', s.document_mode);
+    }
     setSetupMode(false);
     resetSetupState();
     if (s.latex_code) {
@@ -344,6 +358,10 @@ export default function App() {
   const hydrateSession = async (id) => {
     const resp = await axios.get(`${API_BASE}/sessions/${id}`);
     const s = resp.data;
+    if (s.document_mode) {
+      setDocumentMode(s.document_mode);
+      localStorage.setItem('rm_document_mode', s.document_mode);
+    }
     setSetupMode(false);
     resetSetupState();
     setSessionId(s.session_id);
@@ -370,8 +388,10 @@ export default function App() {
     setSetupError('');
     setSetupLoading(true);
     try {
+      const defaultTpl = documentMode === 'research_paper' ? 'paper_starter' : 'starter';
       const resp = await axios.post(`${API_BASE}/setup/import`, {
-        template_name: 'starter',
+        template_name: defaultTpl,
+        document_mode: documentMode,
       });
       const catalog = resp.data.catalog || [];
       setZoneCatalog(catalog);
@@ -382,15 +402,18 @@ export default function App() {
     }
   };
 
-  /** Path Ø: Fresh start — POST /sessions with no URL/latex, uses starter.tex */
-  const startChatFresh = async () => {
+  /** Path Ø: Fresh start — POST /sessions with no URL/latex, uses starter.tex or paper_starter.tex */
+  const startChatFresh = async (templateId = null) => {
     setSetupError('');
     setSetupLoading(true);
     try {
+      const defaultTpl = documentMode === 'research_paper' ? 'paper_starter' : 'starter';
+      const tpl = templateId || defaultTpl;
       const created = await axios.post(`${API_BASE}/sessions`, {
         provider,
         model,
-        template_name: 'starter',
+        template_name: tpl,
+        document_mode: documentMode,
       });
       enterChatFromSession(created.data);
       await loadSessions();
@@ -425,7 +448,10 @@ export default function App() {
       let softenedLatex = latex;
       // Prefetch: URL download or paste preview compile (already Tectonic-softened)
       if (url && !latex) {
-        const preview = await axios.post(`${API_BASE}/setup/import`, { url });
+        const preview = await axios.post(`${API_BASE}/setup/import`, {
+          url,
+          document_mode: documentMode,
+        });
         softenedLatex = preview.data.latex_code || '';
         if (preview.data.compat_notes?.length) {
           setCompatNote(
@@ -440,7 +466,10 @@ export default function App() {
         if (preview.data.pdf_base64) updatePdf(preview.data.pdf_base64);
         if (softenedLatex) setLatexCode(softenedLatex);
       } else if (latex) {
-        const preview = await axios.post(`${API_BASE}/setup/import`, { latex });
+        const preview = await axios.post(`${API_BASE}/setup/import`, {
+          latex,
+          document_mode: documentMode,
+        });
         softenedLatex = preview.data.latex_code || latex;
         if (softenedLatex) setLatexCode(softenedLatex);
         if (preview.data.compat_notes?.length) {
@@ -451,7 +480,13 @@ export default function App() {
         if (preview.data.pdf_base64) updatePdf(preview.data.pdf_base64);
         if (preview.data.compile_error) setCompileNote(preview.data.compile_error);
       }
-      const payload = { provider, model, template_name: selectedTemplate || 'modern' };
+      const defaultTpl = documentMode === 'research_paper' ? 'paper_starter' : 'starter';
+      const payload = {
+        provider,
+        model,
+        template_name: selectedTemplate || defaultTpl,
+        document_mode: documentMode,
+      };
       if (url && !latex) payload.source_url = url;
       // Prefer softened source so session stores what actually compiles
       if (softenedLatex) payload.latex = softenedLatex;
@@ -467,21 +502,130 @@ export default function App() {
   };
 
 
-  const addZone = async () => {
+  const reorderZones = async (newOrder) => {
+    if (!sessionId || setupMode || !newOrder?.length) return;
+    const zmap = Object.fromEntries(zoneCatalog.map((z) => [z.zone_no, z]));
+    const optimisticCatalog = newOrder.map((n) => zmap[n]).filter(Boolean);
+    setZoneCatalog(optimisticCatalog);
+    setZones(optimisticCatalog.map((z) => String(z.zone_no)));
+    setZoneActionNote('Reordering sections & compiling…');
+
+    try {
+      const resp = await axios.patch(`${API_BASE}/sessions/${sessionId}/zone-order`, {
+        zone_order: newOrder,
+      });
+      applyZoneState(resp.data.session, resp.data.latex_code);
+      if (resp.data.latex_code) {
+        await compileAndRender(resp.data.latex_code, sessionId, { quiet: true });
+      }
+    } catch (e) {
+      console.error('Reorder error:', e);
+      setCompileNote(errDetail(e, 'Failed to reorder sections'));
+      await hydrateSession(sessionId);
+    } finally {
+      setZoneActionNote('');
+    }
+  };
+
+  const moveZoneIndex = async (currentIndex, direction) => {
+    const targetIndex = currentIndex + direction;
+    if (targetIndex < 0 || targetIndex >= zoneCatalog.length) return;
+    const currentOrder = zoneCatalog.map((z) => z.zone_no);
+    const nextOrder = [...currentOrder];
+    const [moved] = nextOrder.splice(currentIndex, 1);
+    nextOrder.splice(targetIndex, 0, moved);
+    await reorderZones(nextOrder);
+  };
+
+  const handleZoneDragStart = (e, index) => {
+    setDraggedZoneIndex(index);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', String(index));
+  };
+
+  const handleZoneDragOver = (e, index) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (dragOverZoneIndex !== index) {
+      setDragOverZoneIndex(index);
+    }
+  };
+
+  const handleZoneDrop = async (e, dropIndex) => {
+    e.preventDefault();
+    const fromIndex = draggedZoneIndex;
+    setDraggedZoneIndex(null);
+    setDragOverZoneIndex(null);
+    if (fromIndex == null || fromIndex === dropIndex) return;
+
+    const currentOrder = zoneCatalog.map((z) => z.zone_no);
+    const nextOrder = [...currentOrder];
+    const [moved] = nextOrder.splice(fromIndex, 1);
+    nextOrder.splice(dropIndex, 0, moved);
+    await reorderZones(nextOrder);
+  };
+
+  const handleZoneDragEnd = () => {
+    setDraggedZoneIndex(null);
+    setDragOverZoneIndex(null);
+  };
+
+  const openAddZoneModal = () => {
     if (!sessionId || setupMode) return;
-    const desc = window.prompt('New zone description (e.g. Projects)', 'Projects');
-    if (!desc) return;
-    const resp = await axios.post(`${API_BASE}/sessions/${sessionId}/zones`, {
-      description: desc,
-    });
-    applyZoneState(resp.data.session, resp.data.latex_code);
+    setNewZoneTitle('');
+    setNewZonePosition('end');
+    setShowAddZoneModal(true);
+  };
+
+  const handleCreateZone = async (e) => {
+    e?.preventDefault();
+    if (!sessionId || !newZoneTitle.trim()) return;
+    setNewZoneSubmitting(true);
+    setZoneActionNote('Adding section & compiling…');
+    try {
+      let atStart = false;
+      let afterZoneNo = null;
+      if (newZonePosition === 'start') {
+        atStart = true;
+      } else if (newZonePosition.startsWith('after:')) {
+        afterZoneNo = parseInt(newZonePosition.split(':')[1], 10);
+      }
+      const payload = {
+        description: newZoneTitle.trim(),
+        at_start: atStart,
+        after_zone_no: afterZoneNo,
+      };
+      const resp = await axios.post(`${API_BASE}/sessions/${sessionId}/zones`, payload);
+      applyZoneState(resp.data.session, resp.data.latex_code);
+      setShowAddZoneModal(false);
+      setNewZoneTitle('');
+      setNewZonePosition('end');
+      if (resp.data.latex_code) {
+        await compileAndRender(resp.data.latex_code, sessionId, { quiet: false });
+      }
+    } catch (err) {
+      setCompileNote(errDetail(err, 'Failed to add section'));
+    } finally {
+      setNewZoneSubmitting(false);
+      setZoneActionNote('');
+    }
   };
 
   const removeZone = async (zoneNo) => {
     if (!sessionId || setupMode) return;
     if (!window.confirm(`Remove zone ${zoneNo}?`)) return;
-    const resp = await axios.delete(`${API_BASE}/sessions/${sessionId}/zones/${zoneNo}`);
-    applyZoneState(resp.data.session, resp.data.latex_code);
+    setZoneActionNote(`Removing zone ${zoneNo} & compiling…`);
+    try {
+      const resp = await axios.delete(`${API_BASE}/sessions/${sessionId}/zones/${zoneNo}`);
+      applyZoneState(resp.data.session, resp.data.latex_code);
+      if (resp.data.latex_code) {
+        await compileAndRender(resp.data.latex_code, sessionId, { quiet: true });
+      }
+    } catch (err) {
+      setCompileNote(errDetail(err, 'Failed to remove zone'));
+    } finally {
+      setZoneActionNote('');
+    }
   };
 
   useEffect(() => {
@@ -984,7 +1128,39 @@ export default function App() {
     <div className="h-full flex flex-col bg-ink-50">
       <header className="h-14 shrink-0 border-b border-ink-200 bg-white px-4 lg:px-6 flex items-center justify-between gap-4">
         <div className="flex items-center gap-3 min-w-0">
-          <span className="font-display text-lg text-ink-900">Resume Maker</span>
+          <span className="font-display text-lg text-ink-900">
+            {documentMode === 'research_paper' ? 'Research Paper' : 'Resume Maker'}
+          </span>
+          <div className="flex items-center rounded-lg border border-ink-200 bg-ink-100/60 p-0.5 text-xs font-semibold">
+            <button
+              type="button"
+              onClick={() => {
+                setDocumentMode('resume');
+                localStorage.setItem('rm_document_mode', 'resume');
+              }}
+              className={`px-2.5 py-1 rounded-md transition-colors ${
+                documentMode === 'resume'
+                  ? 'bg-white text-ink-900 shadow-xs'
+                  : 'text-ink-600 hover:text-ink-900'
+              }`}
+            >
+              Resume
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setDocumentMode('research_paper');
+                localStorage.setItem('rm_document_mode', 'research_paper');
+              }}
+              className={`px-2.5 py-1 rounded-md transition-colors ${
+                documentMode === 'research_paper'
+                  ? 'bg-white text-ink-900 shadow-xs'
+                  : 'text-ink-600 hover:text-ink-900'
+              }`}
+            >
+              Research Paper
+            </button>
+          </div>
           <span className="hidden sm:inline text-ink-200">|</span>
           <span className="hidden sm:inline text-xs text-ink-500 truncate">{profile.username}</span>
         </div>
@@ -1117,29 +1293,65 @@ export default function App() {
                   New chat
                 </p>
                 <p className="mt-1 text-sm text-ink-700">
-                  Choose how to start your resume.
+                  {documentMode === 'research_paper'
+                    ? 'Choose an academic paper template to begin.'
+                    : 'Choose how to start your resume.'}
                 </p>
               </div>
 
-              {/* Option 1 — Start Fresh */}
-              <div className="rounded-xl border border-ink-200 p-4 space-y-2 hover:border-accent/50 transition-colors">
-                <p className="text-sm font-semibold text-ink-900">⚡ Start Fresh</p>
-                <p className="text-[11px] text-ink-500 leading-snug">
-                  Instantly create an ATS-ready resume using the standard{' '}
-                  <code className="font-mono text-[10px] bg-ink-100 px-1 rounded">resume.cls</code>{' '}
-                  template. Paste your bio in chat to fill all sections automatically.
-                </p>
-                {setupError && <p className="text-xs text-red-600">{setupError}</p>}
-                <button
-                  type="button"
-                  id="start-fresh-btn"
-                  onClick={startChatFresh}
-                  disabled={setupLoading}
-                  className="w-full h-10 rounded-lg bg-ink-900 text-white text-sm font-semibold hover:bg-ink-800 transition-colors disabled:opacity-40"
-                >
-                  {setupLoading ? 'Creating…' : 'Start fresh resume'}
-                </button>
-              </div>
+              {/* Option 1 — Start Fresh / Templates */}
+              {documentMode === 'research_paper' ? (
+                <div className="rounded-xl border border-ink-200 p-4 space-y-3">
+                  <p className="text-sm font-semibold text-ink-900">📚 Academic Starter Templates</p>
+                  <p className="text-[11px] text-ink-500 leading-snug">
+                    Select a publication-grade LaTeX template with isolated zones for Abstract, Methodology, Experiments, and Citations.
+                  </p>
+                  {setupError && <p className="text-xs text-red-600">{setupError}</p>}
+                  <div className="grid grid-cols-1 gap-2 pt-1">
+                    {[
+                      { id: 'paper_starter', name: 'Standard Two-Column', desc: 'Article layout with math, algorithms, booktabs, and references' },
+                      { id: 'ieee_starter', name: 'IEEE Conference / Trans.', desc: 'IEEE format with index terms, author blocks, and numbered citations' },
+                      { id: 'acm_starter', name: 'ACM SIGCONF', desc: 'ACM format with CCS concepts, affiliations, and sigconf styling' },
+                      { id: 'arxiv_starter', name: 'arXiv / NeurIPS Preprint', desc: 'Single-column preprint format with proof environment and appendix' },
+                    ].map((tpl) => (
+                      <button
+                        key={tpl.id}
+                        type="button"
+                        onClick={() => startChatFresh(tpl.id)}
+                        disabled={setupLoading}
+                        className="text-left p-3 rounded-lg border border-ink-200 bg-ink-50/50 hover:bg-ink-100/70 hover:border-accent/40 transition-colors group disabled:opacity-40"
+                      >
+                        <div className="flex items-center justify-between">
+                          <p className="text-xs font-semibold text-ink-900 group-hover:text-accent">
+                            ⚡ {tpl.name}
+                          </p>
+                          <span className="text-[10px] font-mono text-ink-400">{tpl.id}.tex</span>
+                        </div>
+                        <p className="text-[10px] text-ink-500 mt-1 leading-snug">{tpl.desc}</p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-ink-200 p-4 space-y-2 hover:border-accent/50 transition-colors">
+                  <p className="text-sm font-semibold text-ink-900">⚡ Start Fresh</p>
+                  <p className="text-[11px] text-ink-500 leading-snug">
+                    Instantly create an ATS-ready resume using the standard{' '}
+                    <code className="font-mono text-[10px] bg-ink-100 px-1 rounded">resume.cls</code>{' '}
+                    template. Paste your bio in chat to fill all sections automatically.
+                  </p>
+                  {setupError && <p className="text-xs text-red-600">{setupError}</p>}
+                  <button
+                    type="button"
+                    id="start-fresh-btn"
+                    onClick={() => startChatFresh('starter')}
+                    disabled={setupLoading}
+                    className="w-full h-10 rounded-lg bg-ink-900 text-white text-sm font-semibold hover:bg-ink-800 transition-colors disabled:opacity-40"
+                  >
+                    {setupLoading ? 'Creating…' : 'Start fresh resume'}
+                  </button>
+                </div>
+              )}
 
               {/* Option 2 — Import / Paste */}
               <div className="rounded-xl border border-ink-200 p-4 space-y-3">
@@ -1202,41 +1414,110 @@ export default function App() {
 
           <div className="px-4 py-3 border-b border-ink-200 space-y-2">
             <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1.5 flex-wrap">
                 <p className="text-[11px] font-semibold text-ink-500 uppercase tracking-wider">Zones</p>
                 <span className="text-[10px] text-ink-400 font-medium">
                   ({zoneCatalog.length || zones.length})
                 </span>
+                {zoneActionNote && (
+                  <span className="text-[10px] text-accent animate-pulse font-medium">
+                    · {zoneActionNote}
+                  </span>
+                )}
               </div>
               <button
                 type="button"
-                onClick={addZone}
-                className="text-[11px] font-semibold text-accent hover:underline flex items-center gap-0.5"
+                onClick={openAddZoneModal}
+                className="text-[11px] font-semibold text-accent hover:underline flex items-center gap-0.5 cursor-pointer"
               >
                 <Plus size={12} /> Add zone
               </button>
             </div>
             {zoneCatalog.length > 0 ? (
-              <div className="flex flex-wrap gap-1.5">
-                {zoneCatalog.map((z) => {
+              <div className="flex flex-wrap gap-1.5 items-center">
+                {zoneCatalog.map((z, idx) => {
                   const isTarget = selectedTargetZone === String(z.zone_no) || selectedTargetZone === z.description;
+                  const isDragging = draggedZoneIndex === idx;
+                  const isDragOver = dragOverZoneIndex === idx;
                   return (
-                    <button
+                    <div
                       key={z.zone_no}
-                      type="button"
-                      title="Click to remove zone"
-                      onClick={() => removeZone(z.zone_no)}
-                      className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] transition-colors ${
-                        isTarget
+                      draggable={true}
+                      onDragStart={(e) => handleZoneDragStart(e, idx)}
+                      onDragOver={(e) => handleZoneDragOver(e, idx)}
+                      onDrop={(e) => handleZoneDrop(e, idx)}
+                      onDragEnd={handleZoneDragEnd}
+                      className={`group inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] transition-all select-none ${
+                        isDragging
+                          ? 'opacity-40 scale-95 border-dashed border-accent bg-accent/10 shadow-inner'
+                          : isDragOver
+                          ? 'ring-2 ring-accent ring-offset-1 border-accent bg-accent/20 shadow-sm'
+                          : isTarget
                           ? 'border-accent bg-accent/15 text-accent font-semibold shadow-2xs'
-                          : 'border-ink-200 bg-ink-50 text-ink-700 hover:border-red-300 hover:text-red-700'
+                          : 'border-ink-200 bg-ink-50 text-ink-700 hover:border-ink-400 hover:bg-white'
                       }`}
                     >
-                      <GripVertical size={9} className="opacity-40" />
-                      <span className="font-semibold">Z{z.zone_no}</span>
-                      <span className="truncate max-w-[8.5rem]">{z.description}</span>
-                      <X size={9} className="opacity-50 hover:opacity-100 ml-0.5" />
-                    </button>
+                      <span
+                        title="Drag to reorder"
+                        className="cursor-grab active:cursor-grabbing p-0.5 text-ink-400 hover:text-ink-700"
+                      >
+                        <GripVertical size={10} />
+                      </span>
+
+                      {/* Move left arrow button (visible on hover / focus) */}
+                      {idx > 0 && (
+                        <button
+                          type="button"
+                          title="Move left"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            moveZoneIndex(idx, -1);
+                          }}
+                          className="opacity-40 group-hover:opacity-100 hover:text-accent p-0.5 transition-opacity cursor-pointer"
+                        >
+                          <ChevronLeft size={10} />
+                        </button>
+                      )}
+
+                      {/* Clickable zone label to select as active target */}
+                      <button
+                        type="button"
+                        onClick={() => setSelectedTargetZone(String(z.zone_no))}
+                        title={`Select Zone ${z.zone_no} for targeted edits`}
+                        className="inline-flex items-center gap-1 cursor-pointer"
+                      >
+                        <span className="font-semibold text-ink-900">Z{z.zone_no}</span>
+                        <span className="truncate max-w-[7.5rem]">{z.description}</span>
+                      </button>
+
+                      {/* Move right arrow button (visible on hover / focus) */}
+                      {idx < zoneCatalog.length - 1 && (
+                        <button
+                          type="button"
+                          title="Move right"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            moveZoneIndex(idx, 1);
+                          }}
+                          className="opacity-40 group-hover:opacity-100 hover:text-accent p-0.5 transition-opacity cursor-pointer"
+                        >
+                          <ChevronRight size={10} />
+                        </button>
+                      )}
+
+                      {/* Remove zone button */}
+                      <button
+                        type="button"
+                        title={`Remove Zone ${z.zone_no}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeZone(z.zone_no);
+                        }}
+                        className="opacity-40 hover:opacity-100 hover:text-red-600 p-0.5 transition-colors ml-0.5 cursor-pointer"
+                      >
+                        <X size={10} />
+                      </button>
+                    </div>
                   );
                 })}
               </div>
@@ -1416,7 +1697,10 @@ export default function App() {
                   );
                 })
               ) : (
-                ['Header', 'Education', 'Skills', 'Experience', 'Projects'].map((sec) => {
+                (documentMode === 'research_paper'
+                  ? ['Title & Authors', 'Abstract', 'Introduction', 'Methodology', 'Experiments', 'Conclusion', 'References']
+                  : ['Header', 'Education', 'Skills', 'Experience', 'Projects']
+                ).map((sec) => {
                   const isSel = selectedTargetZone.toLowerCase() === sec.toLowerCase();
                   return (
                     <button
@@ -1438,7 +1722,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setSelectedTargetZone(selectedTargetZone === 'full_rewrite' ? 'auto' : 'full_rewrite')}
-                title="Full Rewrite: applies instructions across the entire resume document"
+                title="Full Rewrite: applies instructions across the entire document"
                 className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
                   selectedTargetZone === 'full_rewrite'
                     ? 'bg-amber-600 text-white shadow-xs'
@@ -1447,6 +1731,34 @@ export default function App() {
               >
                 Full Rewrite
               </button>
+            </div>
+
+            {/* Quick Prompt Suggestions */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 text-[10px] text-ink-500">
+              <span className="shrink-0 font-semibold text-ink-400">Suggestions:</span>
+              {(documentMode === 'research_paper'
+                ? [
+                    'Draft Introduction with contributions',
+                    'Write Methodology with equations',
+                    'Add Experiments table (booktabs)',
+                    'Draft Conclusion & future work',
+                  ]
+                : [
+                    'Add Senior Engineer experience at Stripe',
+                    'Tailor skills for Machine Learning',
+                    'Shorten summary to 2 punchy sentences',
+                    'Add relevant coursework to Education',
+                  ]
+              ).map((suggestion) => (
+                <button
+                  key={suggestion}
+                  type="button"
+                  onClick={() => setInputValue(suggestion)}
+                  className="shrink-0 rounded bg-ink-100/70 hover:bg-ink-200/80 px-2 py-0.5 text-ink-700 transition-colors border border-ink-200/50"
+                >
+                  {suggestion}
+                </button>
+              ))}
             </div>
 
             <div className="space-y-1.5">
@@ -1708,7 +2020,7 @@ export default function App() {
                                 onChange={(e) =>
                                   setProviderDraft((prev) => ({
                                     ...prev,
-                                    [p]: { ...(prev[p] || {}), [f.k]: e.target.value },
+                                    [p]: { ...prev[p], [f.k]: e.target.value },
                                   }))
                                 }
                                 placeholder={placeholderText}
@@ -1778,6 +2090,89 @@ export default function App() {
                 </div>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {showAddZoneModal && (
+        <div
+          className="fixed inset-0 z-50 bg-ink-950/40 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => !newZoneSubmitting && setShowAddZoneModal(false)}
+        >
+          <div
+            className="w-full max-w-md bg-white rounded-lg border border-ink-200 shadow-xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-4 border-b border-ink-200">
+              <div>
+                <h3 className="font-display text-base font-semibold text-ink-900">Add New Section</h3>
+                <p className="text-xs text-ink-500 mt-0.5">
+                  {documentMode === 'research_paper' ? 'Add an academic paper section' : 'Add a section to your resume'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => !newZoneSubmitting && setShowAddZoneModal(false)}
+                className="text-ink-400 hover:text-ink-900 p-1 cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateZone}>
+              <div className="p-5 space-y-4">
+                <label className="block space-y-1.5">
+                  <span className="text-xs font-medium text-ink-700">Section Title</span>
+                  <input
+                    type="text"
+                    required
+                    autoFocus
+                    placeholder={documentMode === 'research_paper' ? 'e.g. RELATED WORK, METHODOLOGY, ABLATION STUDY' : 'e.g. Projects, Certifications, Publications'}
+                    value={newZoneTitle}
+                    onChange={(e) => setNewZoneTitle(e.target.value)}
+                    className="w-full px-3 py-2 rounded-md border border-ink-200 text-sm outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+                  />
+                </label>
+
+                <label className="block space-y-1.5">
+                  <span className="text-xs font-medium text-ink-700">Placement in Document</span>
+                  <select
+                    value={newZonePosition}
+                    onChange={(e) => setNewZonePosition(e.target.value)}
+                    className="w-full px-3 py-2 rounded-md border border-ink-200 text-sm outline-none focus:border-accent focus:ring-1 focus:ring-accent bg-white"
+                  >
+                    <option value="end">At end (bottom)</option>
+                    <option value="start">At start (top)</option>
+                    {zoneCatalog.map((z) => (
+                      <option key={z.zone_no} value={`after:${z.zone_no}`}>
+                        After Z{z.zone_no}: {z.description}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-ink-400">
+                    The document layout will immediately re-assemble and compile to PDF.
+                  </p>
+                </label>
+              </div>
+
+              <div className="px-5 py-3 border-t border-ink-200 bg-ink-50/50 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  disabled={newZoneSubmitting}
+                  onClick={() => setShowAddZoneModal(false)}
+                  className="px-3 py-1.5 rounded-md border border-ink-200 text-xs font-medium text-ink-700 hover:bg-ink-100 disabled:opacity-40 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={newZoneSubmitting || !newZoneTitle.trim()}
+                  className="px-4 py-1.5 rounded-md bg-accent text-white text-xs font-semibold hover:bg-accent-mid disabled:opacity-40 flex items-center gap-1 cursor-pointer"
+                >
+                  {newZoneSubmitting ? 'Adding & Compiling…' : '+ Add Section'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

@@ -12,7 +12,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 # Ensure UTF-8 output on Windows consoles
 if sys.stdout.encoding != "utf-8":
@@ -29,9 +29,9 @@ from core.ai_agent import ai_agent
 from core.compiler import CompilationError, compiler
 from core.latex_to_zones import latex_to_zones
 from core.session_store import (
+    rollback_to_snapshot,
     session_store,
     take_snapshot,
-    rollback_to_snapshot,
 )
 from core.templates import template_manager
 from core.zone_document import (
@@ -240,7 +240,7 @@ def test_10_changes_pipeline():
     results_table.add_column("PDF Size", style="blue")
     results_table.add_column("Latency (s)", style="bright_black")
 
-    full_logs: List[Dict[str, Any]] = []
+    full_logs: list[dict[str, Any]] = []
 
     for idx, (title, prompt) in enumerate(changes, 1):
         start_time = time.time()
@@ -256,7 +256,7 @@ def test_10_changes_pipeline():
 
         is_first_fill = (idx == 1)
 
-        log_entry: Dict[str, Any] = {
+        log_entry: dict[str, Any] = {
             "step_number": idx,
             "title": title,
             "prompt": prompt,

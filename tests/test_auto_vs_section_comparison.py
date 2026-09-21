@@ -14,7 +14,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 # Ensure UTF-8 output on Windows consoles
 if sys.stdout.encoding != "utf-8":
@@ -32,7 +32,9 @@ from core.ai_agent import ai_agent
 from core.compiler import CompilationError, compiler
 from core.latex_to_zones import latex_to_zones
 from core.session_store import session_store
-from core.zone_document import ZoneDocument, ensure_full_document, sync_session_from_document
+from core.zone_document import (
+    ensure_full_document,
+)
 from llm_router import ChatMessage, llm_router
 from rich.console import Console
 from rich.table import Table
@@ -251,7 +253,7 @@ def run_benchmark():
         },
     ]
 
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
 
     for tc in test_cases:
         console.rule(f"[bold cyan]Benchmarking: {tc['section_name']} ({tc['id']})[/bold cyan]")

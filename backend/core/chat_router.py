@@ -2,24 +2,24 @@
 
 from __future__ import annotations
 
-import json
-import re
 from typing import Any, Literal
 
 from pydantic import BaseModel
 
 try:
+    from core.latex_sanitizer import safe_extract_json
     from core.logging_setup import get_logger
-    from core.zone_agents import _pre_escape_backslashes
     from llm_router import ChatMessage, llm_router
 except ImportError:
+    from ..latex_sanitizer import safe_extract_json
     from ..llm_router import ChatMessage, llm_router  # type: ignore
     from .logging_setup import get_logger
-    from .zone_agents import _pre_escape_backslashes
 
 log = get_logger("chat_router")
 
-RouteName = Literal["direct_reply", "orchestrator", "structure", "content"]
+RouteName = Literal[
+    "direct_reply", "orchestrator", "structure", "content", "style"
+]
 
 
 class RouteDecision(BaseModel):
@@ -28,23 +28,7 @@ class RouteDecision(BaseModel):
     reply: str | None = None
 
 
-def _extract_json(text: str) -> dict:
-    """Extract and parse JSON object from LLM response string."""
-    text = (text or "").strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    text = _pre_escape_backslashes(text)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(0))
-            except json.JSONDecodeError:
-                return {}
-        return {}
+_extract_json = safe_extract_json
 
 
 def classify_route(
@@ -110,21 +94,25 @@ def classify_route(
         "'direct_reply', you MUST provide a friendly, helpful, and "
         "context-aware answer in the 'reply' field using the chat history.\n"
         "2. 'structure': The user explicitly wants to change the layout "
-        "structure: adding a new section, deleting/removing an entire section, "
-        "or rearranging/reordering/swapping sections.\n"
+        "structure: adding a new section, deleting/removing an entire "
+        "section, or rearranging/reordering/swapping sections.\n"
         "3. 'content': The user wants to edit, update, add, or delete text or "
         "bullet points INSIDE an existing section, or paste biography/work "
-        "history to fill the sections.\n\n"
+        "history to fill the sections.\n"
+        "4. 'style': The user wants to change styling, fonts, typography, "
+        "colors, color themes, margins, spacing, font size (e.g. "
+        "10pt/11pt/12pt), or column layout (e.g. 2-column or 1-column).\n\n"
         "Return JSON format:\n"
         "{\n"
-        '  "route": "direct_reply" | "structure" | "content",\n'
+        '  "route": "direct_reply" | "structure" | "content" | "style",\n'
         '  "reason": "brief explanation",\n'
         '  "reply": "contextual reply if direct_reply, otherwise null"\n'
         "}"
     )
 
+    sys_content = f"{system}\n\n{catalog_txt}".strip()
     messages: list[ChatMessage] = [
-        ChatMessage(role="system", content=f"{system}\n\n{catalog_txt}".strip())
+        ChatMessage(role="system", content=sys_content)
     ]
 
     # Include recent chat history for context-awareness (up to 10 turns)
@@ -153,7 +141,7 @@ def classify_route(
             .lower()
             .strip()
         )
-        if route not in ("direct_reply", "structure", "content"):
+        if route not in ("direct_reply", "structure", "content", "style"):
             route = "direct_reply"
 
         decision = RouteDecision(

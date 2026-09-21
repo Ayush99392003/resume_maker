@@ -24,9 +24,9 @@ from core.ai_agent import ai_agent
 from core.compiler import CompilationError, compiler
 from core.latex_to_zones import latex_to_zones
 from core.session_store import (
+    rollback_to_snapshot,
     session_store,
     take_snapshot,
-    rollback_to_snapshot,
 )
 from core.templates import template_manager
 from core.zone_document import (

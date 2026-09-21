@@ -17,31 +17,32 @@ _PROVIDER_DOWN_RE = re.compile(
 from pydantic import BaseModel, Field
 
 try:
+    import core.research_agents as _research_agents  # noqa: F401
+    from core.latex_sanitizer import safe_extract_json
     from core.logging_setup import get_logger
+    from core.style_agent import style_agent
     from core.tools import (
         CONTENT_TOOLS_DESCRIPTION,
         STRUCTURE_TOOLS_DESCRIPTION,
+        STYLE_TOOLS_DESCRIPTION,
     )
     from core.zone_agents import (
-        _clean_backslash_typos,
-        _escape_raw_latex_chars,
         _extract_delimited,
-        _pre_escape_backslashes,
         zone_agent_router,
     )
     from llm_router import ChatMessage, llm_router
 except ImportError:
     from ..llm_router import ChatMessage, llm_router  # type: ignore
+    from .latex_sanitizer import safe_extract_json
     from .logging_setup import get_logger
+    from .style_agent import style_agent
     from .tools import (
         CONTENT_TOOLS_DESCRIPTION,
         STRUCTURE_TOOLS_DESCRIPTION,
+        STYLE_TOOLS_DESCRIPTION,
     )
     from .zone_agents import (
-        _clean_backslash_typos,
-        _escape_raw_latex_chars,
         _extract_delimited,
-        _pre_escape_backslashes,
         zone_agent_router,
     )
 
@@ -49,35 +50,7 @@ from .zone_document import ZoneDocument
 
 log = get_logger("orchestrator")
 
-
-def _sanitize_tex_json(obj: Any) -> Any:
-    """De-duplicate double backslashes left by over-eager LLMs."""
-    if isinstance(obj, str):
-        obj = re.sub(r"\r([a-zA-Z])", r"\\r\1", obj)
-        obj = re.sub(r"\\{2,}([a-zA-Z])", r"\\\1", obj)
-        obj = _clean_backslash_typos(obj)
-        obj = _escape_raw_latex_chars(obj)
-        return obj
-    elif isinstance(obj, dict):
-        return {k: _sanitize_tex_json(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [_sanitize_tex_json(x) for x in obj]
-    return obj
-
-
-def _extract_json(text: str) -> dict:
-    text = (text or "").strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    text = _pre_escape_backslashes(text)
-    try:
-        return _sanitize_tex_json(json.loads(text))
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            return _sanitize_tex_json(json.loads(match.group(0)))
-        raise
+_extract_json = safe_extract_json
 
 
 class OrchStep(BaseModel):
@@ -88,6 +61,7 @@ class OrchStep(BaseModel):
     at_start: bool = False
     new_order: list[int] = Field(default_factory=list)
     swap: list[int] = Field(default_factory=list)
+    move: dict[str, Any] = Field(default_factory=dict)
 
 
 class OrchPlan(BaseModel):
@@ -262,58 +236,74 @@ def plan_intents(
                 api_key=api_key,
                 temperature=0.1,
             )
-            tool = (
-                str(data.get("tool") or "")
-                .replace(r"\_", "_")
-                .strip()
-                .lower()
-            )
-            raw_args = data.get("args") or {}
-            args = (
-                {
-                    str(k).replace(r"\_", "_"): v
-                    for k, v in raw_args.items()
-                }
-                if isinstance(raw_args, dict)
-                else {}
-            )
             reason = str(data.get("reason") or "structure_tool")
 
-            if tool == "add_zone":
-                title = str(args.get("title") or "Custom section")
-                after = args.get("after_zone_no")
-                at_start = bool(args.get("at_start"))
-                return OrchPlan(
-                    steps=[
+            # Support both single action and multiple actions
+            raw_actions = data.get("actions")
+            if not isinstance(raw_actions, list) or not raw_actions:
+                raw_actions = [data]
+
+            steps: list[OrchStep] = []
+            for act in raw_actions:
+                if not isinstance(act, dict):
+                    continue
+                tool = (
+                    str(act.get("tool") or "")
+                    .replace(r"\_", "_")
+                    .strip()
+                    .lower()
+                )
+                raw_args = act.get("args") or {}
+                args = (
+                    {
+                        str(k).replace(r"\_", "_"): v
+                        for k, v in raw_args.items()
+                    }
+                    if isinstance(raw_args, dict)
+                    else {}
+                )
+
+                if tool == "add_zone":
+                    title = str(args.get("title") or "Custom section")
+                    after = args.get("after_zone_no")
+                    at_start = bool(args.get("at_start"))
+                    steps.append(
                         OrchStep(
                             intent="add_zone",
                             description=title,
                             after_zone_no=after,
                             at_start=at_start,
                         )
-                    ],
-                    reason=reason,
-                )
-            elif tool == "remove_zone":
-                zone_nos = [int(x) for x in (args.get("zone_nos") or [])]
-                if not zone_nos:
-                    return OrchPlan(
-                        clarify="Which zone should I remove?",
-                        reason="remove_unclear",
                     )
+                elif tool == "remove_zone":
+                    zone_nos = [int(x) for x in (args.get("zone_nos") or [])]
+                    if zone_nos:
+                        steps.append(
+                            OrchStep(intent="remove_zone", zone_nos=zone_nos)
+                        )
+                elif tool == "reorder_zones":
+                    swap = [int(x) for x in (args.get("swap") or [])]
+                    new_order = [int(x) for x in (args.get("new_order") or [])]
+                    raw_move = args.get("move")
+                    move_dict = raw_move if isinstance(raw_move, dict) else {}
+                    steps.append(
+                        OrchStep(
+                            intent="reorder",
+                            swap=swap,
+                            new_order=new_order,
+                            move=move_dict,
+                        )
+                    )
+
+            if not steps:
                 return OrchPlan(
-                    steps=[OrchStep(intent="remove_zone", zone_nos=zone_nos)],
-                    reason=reason,
+                    clarify=(
+                        "Could you clarify how you'd like to adjust the "
+                        "sections?"
+                    ),
+                    reason="structure_unclear",
                 )
-            elif tool == "reorder_zones":
-                swap = [int(x) for x in (args.get("swap") or [])]
-                new_order = [int(x) for x in (args.get("new_order") or [])]
-                return OrchPlan(
-                    steps=[
-                        OrchStep(intent="reorder", swap=swap, new_order=new_order)
-                    ],
-                    reason=reason,
-                )
+            return OrchPlan(steps=steps, reason=reason)
 
         elif category == "content":
             # Content Branch: Target specific zone content or bio fill
@@ -356,7 +346,7 @@ def plan_intents(
                 if z_no is not None and int(z_no) in doc.zone_map():
                     return OrchPlan(
                         steps=[OrchStep(intent="edit", zone_nos=[int(z_no)])],
-                        reason=reason,
+                        reason="content_tool",
                     )
             elif tool == "fill_resume":
                 z_nos = [
@@ -367,8 +357,14 @@ def plan_intents(
                         OrchStep(intent="fill", zone_nos=z_nos),
                         OrchStep(intent="describe", zone_nos=z_nos),
                     ],
-                    reason=reason,
+                    reason="content_tool",
                 )
+
+        elif category == "style":
+            return OrchPlan(
+                steps=[OrchStep(intent="style")],
+                reason="style_branch",
+            )
 
         else:
             # Combined tool schema fallback
@@ -376,7 +372,8 @@ def plan_intents(
                 "You are the resume orchestrator planner. Select the "
                 "appropriate tool for the user's request:\n\n"
                 f"{STRUCTURE_TOOLS_DESCRIPTION}\n\n"
-                f"{CONTENT_TOOLS_DESCRIPTION}"
+                f"{CONTENT_TOOLS_DESCRIPTION}\n\n"
+                f"{STYLE_TOOLS_DESCRIPTION}"
             )
             user_prompt = (
                 f"Current Zones:\n{catalog_txt}\n"
@@ -406,7 +403,6 @@ def plan_intents(
                 if isinstance(raw_args, dict)
                 else {}
             )
-            reason = str(data.get("reason") or "combined_tool")
 
             if tool == "add_zone":
                 return OrchPlan(
@@ -420,7 +416,7 @@ def plan_intents(
                             at_start=bool(args.get("at_start")),
                         )
                     ],
-                    reason=reason,
+                    reason="structure_tool",
                 )
             elif tool == "remove_zone":
                 zone_nos = [int(x) for x in (args.get("zone_nos") or [])]
@@ -431,7 +427,7 @@ def plan_intents(
                     )
                 return OrchPlan(
                     steps=[OrchStep(intent="remove_zone", zone_nos=zone_nos)],
-                    reason=reason,
+                    reason="structure_tool",
                 )
             elif tool == "reorder_zones":
                 return OrchPlan(
@@ -444,14 +440,14 @@ def plan_intents(
                             ],
                         )
                     ],
-                    reason=reason,
+                    reason="structure_tool",
                 )
             elif tool == "edit_zone_content":
                 z_no = args.get("zone_no")
                 if z_no is not None and int(z_no) in doc.zone_map():
                     return OrchPlan(
                         steps=[OrchStep(intent="edit", zone_nos=[int(z_no)])],
-                        reason=reason,
+                        reason="content_tool",
                     )
             elif tool == "fill_resume":
                 z_nos = [
@@ -462,10 +458,30 @@ def plan_intents(
                         OrchStep(intent="fill", zone_nos=z_nos),
                         OrchStep(intent="describe", zone_nos=z_nos),
                     ],
-                    reason=reason,
+                    reason="content_tool",
+                )
+            elif tool == "update_document_style":
+                return OrchPlan(
+                    steps=[OrchStep(intent="style")],
+                    reason="style_branch",
                 )
     except Exception:
         log.exception("orch.error: plan_intents tool router failed")
+
+    # Heuristic style matching
+    style_keywords = (
+        "font", "margins", "margin", "color", "theme", "twocolumn",
+        "two column", "onecolumn", "one column", "10pt", "11pt", "12pt",
+        "palatino", "helvetica", "times new roman", "lmodern"
+    )
+    if any(k in message.lower() for k in style_keywords) and not any(
+        z in message.lower()
+        for z in ("experience", "education", "skill", "summary", "project")
+    ):
+        return OrchPlan(
+            steps=[OrchStep(intent="style")],
+            reason="heuristic_style",
+        )
 
     # Fallback to text match if tool call failed or was unrecognized
     target = _match_zone_by_text(doc, message)
@@ -692,6 +708,23 @@ class Orchestrator:
             if intent == "clarify":
                 continue
 
+            if intent == "style":
+                try:
+                    doc, summary = style_agent.run_style(
+                        doc,
+                        user_message,
+                        provider=provider,
+                        model=model,
+                        api_key=api_key,
+                    )
+                    changed.append("header")
+                    summaries.append(summary)
+                    trace.append({"tool": "agent.style", "summary": summary})
+                except Exception as e:
+                    log.exception("orch.error: style agent failed - %s", e)
+                    summaries.append(f"Style update failed: {e}")
+                continue
+
             if intent == "add_zone":
                 rec = doc.add_zone(
                     description=step.description or "Custom section",
@@ -732,7 +765,48 @@ class Orchestrator:
 
             if intent == "reorder":
                 try:
-                    if len(step.swap) == 2:
+                    if step.move:
+                        z_raw = step.move.get("zone_no")
+                        z_no: int | None = None
+                        if isinstance(z_raw, int):
+                            z_no = z_raw
+                        elif isinstance(z_raw, str):
+                            if z_raw.strip().isdigit():
+                                z_no = int(z_raw.strip())
+                            else:
+                                z_no = _match_zone_by_text(doc, z_raw)
+
+                        if z_no is not None and z_no in doc.zone_map():
+                            to_pos = step.move.get("to_position")
+                            after_z = step.move.get("after_zone_no")
+                            before_z = step.move.get("before_zone_no")
+                            t_idx = (
+                                (int(to_pos) - 1)
+                                if to_pos is not None
+                                else None
+                            )
+                            doc.move(
+                                z_no,
+                                before=(
+                                    int(before_z)
+                                    if before_z is not None
+                                    else None
+                                ),
+                                after=(
+                                    int(after_z)
+                                    if after_z is not None
+                                    else None
+                                ),
+                                target_index=t_idx,
+                            )
+                            summaries.append(
+                                f"Moved zone {z_no} in document order"
+                            )
+                        else:
+                            summaries.append(
+                                f"Zone {z_raw} not found for move"
+                            )
+                    elif len(step.swap) == 2:
                         doc.swap(step.swap[0], step.swap[1])
                         summaries.append(
                             f"Swapped zone {step.swap[0]} and {step.swap[1]}"
@@ -824,6 +898,7 @@ class Orchestrator:
                             full_digest=compact_digest,
                             user_message=user_message,
                             is_initial=(op_intent == "fill"),
+                            document_mode=getattr(doc, "document_mode", "resume"),
                             provider=provider,
                             model=model,
                             api_key=api_key,

@@ -8,18 +8,18 @@ backend/venv/
 .venv/
 venv/
 ENV/
-
+ruff_fixed.txt
 # Environment Variables and Secrets
 .env
 .env.*
 !.env.template
 !.env.production.template
 !.env.example
-
+.ruff_cache
 # Durable chat sessions and local profile data
 backend/data/
 data/
-
+scratch
 # Local Tectonic binary & font configs (downloadable/generated)
 backend/bin/
 backend/etc/

@@ -6,7 +6,6 @@ import os
 import threading
 import time
 from collections import deque
-from typing import Dict
 
 from core.logging_setup import get_logger
 
@@ -32,7 +31,7 @@ class RateLimiter:
     ) -> None:
         self._max_calls = max_calls
         self._window = window_secs
-        self._buckets: Dict[str, deque] = {}
+        self._buckets: dict[str, deque] = {}
         self._lock = threading.Lock()
 
     def check_and_record(self, key: str) -> bool:

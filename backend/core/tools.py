@@ -1,13 +1,13 @@
-"""Tool definitions, schemas, and descriptors for the tree-based orchestrator."""
+"""Tool definitions, schemas, and descriptors for tree-based orchestrator."""
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 # High-level category for the first branch of the decision tree
-RouteCategory = Literal["direct_reply", "structure", "content"]
+RouteCategory = Literal["direct_reply", "structure", "content", "style"]
 
 
 class CategoryDecision(BaseModel):
@@ -18,7 +18,8 @@ class CategoryDecision(BaseModel):
         description=(
             "Routing category: 'direct_reply' for questions/chitchat, "
             "'structure' for adding/removing/reordering sections, "
-            "'content' for modifying text inside a section or filling bio."
+            "'content' for modifying text inside a section or filling bio, "
+            "'style' for changing fonts, colors, margins, or layout."
         ),
     )
     reason: str = Field(
@@ -50,7 +51,8 @@ class AddZoneTool(BaseModel):
     after_zone_no: int | None = Field(
         default=None,
         description=(
-            "Existing zone number after which this new section should be inserted."
+            "Existing zone number after which this new section should be "
+            "inserted."
         ),
     )
     at_start: bool = Field(
@@ -67,7 +69,7 @@ class RemoveZoneTool(BaseModel):
     tool_name: Literal["remove_zone"] = "remove_zone"
     zone_nos: list[int] = Field(
         ...,
-        description="List of zone numbers to permanently delete from the resume.",
+        description="List of zone numbers to permanently delete.",
     )
 
 
@@ -77,11 +79,18 @@ class ReorderZonesTool(BaseModel):
     tool_name: Literal["reorder_zones"] = "reorder_zones"
     new_order: list[int] | None = Field(
         default=None,
-        description="Complete list of all zone numbers in desired sequential order.",
+        description="Complete list of all zone numbers in desired order.",
     )
     swap: list[int] | None = Field(
         default=None,
         description="Pair of two zone numbers to swap positions (e.g. [2, 4]).",
+    )
+    move: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Move a single zone: e.g. {'zone_no': 4, 'after_zone_no': 5} or "
+            "{'zone_no': 4, 'to_position': 6}."
+        ),
     )
 
 
@@ -109,8 +118,58 @@ class FillResumeTool(BaseModel):
     zone_nos: list[int] | None = Field(
         default=None,
         description=(
-            "Optional subset of zone numbers to fill (defaults to all active zones)."
+            "Optional subset of zone numbers to fill (defaults to all active)."
         ),
+    )
+
+
+# --- Style Branch Tools ---
+
+
+class UpdateDocumentStyleTool(BaseModel):
+    """Tool: Update document style, fonts, colors, margins, or layout."""
+
+    tool_name: Literal["update_document_style"] = "update_document_style"
+    font_family: str | None = Field(
+        default=None,
+        description=(
+            "Font family: 'times', 'helvetica', 'lmodern', "
+            "'palatino', 'default'."
+        ),
+    )
+    font_size: str | None = Field(
+        default=None,
+        description="Font size: '10pt', '11pt', '12pt'.",
+    )
+    color_theme: str | None = Field(
+        default=None,
+        description=(
+            "Preset theme: 'blue', 'green', 'burgundy', 'slate', 'black'."
+        ),
+    )
+    primary_color: str | None = Field(
+        default=None,
+        description="Hex primary color e.g. '#2563EB'.",
+    )
+    accent_color: str | None = Field(
+        default=None,
+        description="Hex accent color e.g. '#60A5FA'.",
+    )
+    text_color: str | None = Field(
+        default=None,
+        description="Hex body text color e.g. '#1F2937'.",
+    )
+    margins: str | None = Field(
+        default=None,
+        description="Margins: 'compact', 'normal', 'wide', '0.5in', '0.75in'.",
+    )
+    column_layout: str | None = Field(
+        default=None,
+        description="Layout: 'onecolumn' or 'twocolumn'.",
+    )
+    instructions: str = Field(
+        default="",
+        description="Specific instructions for document styling.",
     )
 
 
@@ -118,37 +177,58 @@ class FillResumeTool(BaseModel):
 
 STRUCTURE_TOOLS_DESCRIPTION = """Available Structural Tools:
 1. `add_zone`:
-   Description: Inserts a brand new section into the resume.
+   Description: Inserts a brand new section into the document.
    Arguments:
-     - `title`: (string) Title of the new section (e.g. 'Certifications', 'Volunteering').
-     - `after_zone_no`: (optional integer) Zone number after which to place the new section.
-     - `at_start`: (optional boolean) True if the section belongs at the beginning.
+     - `title`: (string) Title of the new section.
+     - `after_zone_no`: (optional integer) Place after this zone number.
+     - `at_start`: (optional boolean) True if section belongs at beginning.
 
 2. `remove_zone`:
-   Description: Permanently deletes an entire section/zone from the resume. ONLY use when deleting a full section (e.g. 'remove projects'). NEVER use when removing a single bullet point or item inside a section.
+   Description: Permanently deletes an entire section/zone from the document.
    Arguments:
      - `zone_nos`: (list of integers) Zone numbers to remove.
 
 3. `reorder_zones`:
-   Description: Rearranges or swaps the sequence of existing resume sections.
+   Description: Rearranges, moves, or swaps sequence of existing sections.
    Arguments:
      - `swap`: (list of two integers) e.g. [2, 3] to swap zone 2 and 3.
-     - `new_order`: (list of integers) full list of zone numbers in desired order.
+     - `new_order`: (list of integers) full or partial list of zone numbers.
+     - `move`: (object) Move single zone, e.g. {"zone_no": 4, "to_position": 6} or {"zone_no": 4, "after_zone_no": 5}.
 
 Return JSON format:
-{"tool": "add_zone" | "remove_zone" | "reorder_zones", "args": {...}, "reason": "..."}"""
+For single action:
+{"tool": "add_zone" | "remove_zone" | "reorder_zones", "args": {...}, "reason": "..."}
+For multiple actions:
+{"actions": [{"tool": "...", "args": {...}}, ...], "reason": "..."}"""
 
 CONTENT_TOOLS_DESCRIPTION = """Available Content Tools:
 1. `edit_zone_content`:
-   Description: Edits, adds, rewrites, or deletes text/bullets INSIDE an existing section (e.g. 'change GPA', 'add python to skills', 'remove Google internship', 'make summary shorter').
+   Description: Edits text/bullets inside an existing section.
    Arguments:
      - `zone_no`: (integer) The single zone number to modify.
-     - `instructions`: (string) Concise instructions for the zone specialist.
+     - `instructions`: (string) Concise instructions for zone specialist.
 
 2. `fill_resume`:
-   Description: Populates empty zones or rewrites all zones from biographical profile data or full resume text.
+   Description: Populates empty zones or rewrites zones from bio data.
    Arguments:
      - `zone_nos`: (optional list of integers) Target zones or empty for all.
 
 Return JSON format:
 {"tool": "edit_zone_content" | "fill_resume", "args": {...}, "reason": "..."}"""
+
+STYLE_TOOLS_DESCRIPTION = """Available Style Tools:
+1. `update_document_style`:
+   Description: Modifies document styling, fonts, colors, margins, or layout.
+   Arguments:
+     - `font_family`: (optional string) 'times', 'helvetica', 'lmodern', 'palatino', 'default'.
+     - `font_size`: (optional string) '10pt', '11pt', '12pt'.
+     - `color_theme`: (optional string) 'blue', 'green', 'burgundy', 'slate', 'black'.
+     - `primary_color`: (optional string) hex color e.g. '#2563EB'.
+     - `accent_color`: (optional string) hex color e.g. '#60A5FA'.
+     - `text_color`: (optional string) hex color e.g. '#1F2937'.
+     - `margins`: (optional string) 'compact', 'normal', 'wide', '0.5in', '0.75in'.
+     - `column_layout`: (optional string) 'onecolumn' or 'twocolumn'.
+     - `instructions`: (optional string) additional instructions.
+
+Return JSON format:
+{"tool": "update_document_style", "args": {...}, "reason": "..."}"""

@@ -1,0 +1,107 @@
+% Academic Research Paper — Standard Two-Column Format
+\documentclass[10pt,twocolumn]{article}
+
+\usepackage[margin=0.75in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{cite}
+\usepackage[dvipsnames]{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{colorlinks=true,linkcolor=MidnightBlue,citecolor=MidnightBlue,urlcolor=MidnightBlue}
+
+\begin{document}
+
+% ZONE:TITLE_AUTHORS:START
+\title{\textbf{Scalable Multi-Agent Document Generation and Synthesis}}
+\author{
+  \textbf{First Author}$^{1}$, \textbf{Second Author}$^{2}$ \\
+  $^{1}$Department of Computer Science, University of Technology \\
+  $^{2}$AI Research Laboratories, Institute of Science \\
+  \texttt{\{first.author, second.author\}@institution.edu}
+}
+\date{\today}
+\maketitle
+% ZONE:TITLE_AUTHORS:END
+
+% ZONE:ABSTRACT:START
+\begin{abstract}
+Automated document synthesis requires balancing structural consistency, domain-specific formatting constraints, and responsive multi-turn human-in-the-loop editing. In this paper, we present an end-to-end multi-agent pipeline for modular LaTeX compilation and repair. Our architecture introduces isolated zone agents responsible for targeted document sections, coordinated by a stateful orchestrator that ensures compilation invariants. Empirical evaluation on benchmark corpora demonstrates a 42\% reduction in compilation faults and a 3.2x speedup in document revision latency compared to monolithic approaches.
+\end{abstract}
+% ZONE:ABSTRACT:END
+
+% ZONE:INTRODUCTION:START
+\section{Introduction}
+Document authoring in technical domains frequently relies on typesetting systems such as \LaTeX{} to produce publication-ready manuscripts. However, integrating Large Language Models (LLMs) into iterative document editing introduces major hurdles: broken control sequences, syntax hallucinations, and full-document re-generation costs.
+
+In this work, we propose a modular architecture that solves these challenges:
+\begin{itemize}
+  \item \textbf{Zone Decomposition}: Parsing documents into distinct, independently editable functional zones with strict boundary isolation.
+  \item \textbf{Specialist Agents}: Routing localized edits to dedicated domain experts that enforce semantic and structural schemas.
+  \item \textbf{Resilient Compilation}: Auto-repairing engine that intercepts compiler errors and dynamically injects missing packages, color definitions, and font mappings.
+\end{itemize}
+% ZONE:INTRODUCTION:END
+
+% ZONE:RELATED_WORK:START
+\section{Related Work}
+Prior investigations into automated document generation primarily focus on monolithic prompting techniques~\cite{lamport1994latex,knuth1984texbook}. While effective for simple snippets, monolithic generation suffers from cumulative hallucination rates on multi-page manuscripts.
+
+Recent advances in multi-agent workflows have demonstrated improved performance across coding and mathematical reasoning tasks~\cite{vaswani2017attention}. We extend these paradigms to structured typesetting and incremental AST maintenance.
+% ZONE:RELATED_WORK:END
+
+% ZONE:METHODOLOGY:START
+\section{Methodology}
+Our system consists of three core components: the Zone Engine, the Specialist Agent Pool, and the Compatibility Engine.
+
+\subsection{Zone Representation}
+Given a document $\mathcal{D}$, we partition it into an ordered set of zones $\mathcal{Z} = \{z_1, z_2, \dots, z_n\}$ such that:
+\begin{equation}
+\mathcal{D} = \mathcal{H} \cup \left( \bigcup_{i=1}^n z_i \right) \cup \mathcal{F}
+\end{equation}
+where $\mathcal{H}$ represents the preamble and document start, and $\mathcal{F}$ represents the document terminus.
+% ZONE:METHODOLOGY:END
+
+% ZONE:EXPERIMENTS:START
+\section{Experiments}
+We benchmark our approach across 1,000 synthetic editing prompts and evaluate compilation success rate and latency.
+
+\begin{table}[ht]
+\centering
+\caption{Performance comparison on document revision benchmarks.}
+\label{tab:results}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Approach} & \textbf{Success Rate (\%)} & \textbf{Latency (s)} \\
+\midrule
+Monolithic LLM   & 74.2 & 14.8 \\
+Section Patcher  & 88.5 & 6.2 \\
+Our System       & \textbf{98.9} & \textbf{2.1} \\
+\bottomrule
+\end{tabular}
+\end{table}
+% ZONE:EXPERIMENTS:END
+
+% ZONE:DISCUSSION:START
+\section{Discussion}
+The quantitative improvements highlighted in Table~\ref{tab:results} stem directly from zone isolation. By restricting the LLM context to the targeted zone, we minimize hallucinated package collisions and preserve unchanged sections verbatim.
+% ZONE:DISCUSSION:END
+
+% ZONE:CONCLUSION:START
+\section{Conclusion}
+We presented a modular multi-agent framework for resilient \LaTeX{} document synthesis. Our architecture enables fast, reliable document authoring with automated error repair. Future work includes expanding real-time collaborative editing and multimodal figure synthesis.
+% ZONE:CONCLUSION:END
+
+% ZONE:REFERENCES:START
+\begin{thebibliography}{99}
+\bibitem{lamport1994latex}
+L.~Lamport, \emph{\LaTeX: A Document Preparation System}, 2nd~ed.\hskip 1em plus 0.5em minus 0.4em\relax Addison-Wesley, 1994.
+
+\bibitem{knuth1984texbook}
+D.~E.~Knuth, \emph{The \TeX{}book}.\hskip 1em plus 0.5em minus 0.4em\relax Addison-Wesley, 1984.
+
+\bibitem{vaswani2017attention}
+A.~Vaswani \emph{et al.}, ``Attention is all you need,'' in \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2017, pp. 5998--6008.
+\end{thebibliography}
+% ZONE:REFERENCES:END
+
+\end{document}

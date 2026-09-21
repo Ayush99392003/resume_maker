@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, List, Optional
+from typing import Any
 
 from .base import ChatMessage, LLMProvider, LLMResponse
 
@@ -13,10 +13,10 @@ class AzureProvider(LLMProvider):
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
-        endpoint: Optional[str] = None,
-        deployment: Optional[str] = None,
-        api_version: Optional[str] = None,
+        api_key: str | None = None,
+        endpoint: str | None = None,
+        deployment: str | None = None,
+        api_version: str | None = None,
     ):
         self.api_key = api_key or os.getenv("AZURE_OPENAI_API_KEY")
         self.endpoint = endpoint or os.getenv("AZURE_OPENAI_ENDPOINT")
@@ -58,11 +58,11 @@ class AzureProvider(LLMProvider):
 
     def chat(
         self,
-        messages: List[ChatMessage],
+        messages: list[ChatMessage],
         *,
         model: str,
         temperature: float = 0.4,
-        response_format: Optional[str] = None,
+        response_format: str | None = None,
     ) -> LLMResponse:
         # Azure uses deployment name; prefer env deployment, allow model override
         deployment = model or self.deployment

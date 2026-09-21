@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from typing import List, Optional
 
 from .base import ChatMessage, LLMProvider, LLMResponse
 
@@ -11,7 +10,7 @@ from .base import ChatMessage, LLMProvider, LLMResponse
 class AnthropicProvider(LLMProvider):
     name = "anthropic"
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: str | None = None):
         self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
         self._client = None
 
@@ -36,11 +35,11 @@ class AnthropicProvider(LLMProvider):
 
     def chat(
         self,
-        messages: List[ChatMessage],
+        messages: list[ChatMessage],
         *,
         model: str,
         temperature: float = 0.4,
-        response_format: Optional[str] = None,
+        response_format: str | None = None,
     ) -> LLMResponse:
         system = "\n\n".join(
             m.content for m in messages if m.role == "system"

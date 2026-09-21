@@ -5,6 +5,7 @@ backend_dir = Path(__file__).resolve().parent.parent / "backend"
 sys.path.insert(0, str(backend_dir))
 
 import re
+
 from core.overleaf_import import _download, _github_zip_url
 
 url = "https://www.overleaf.com/latex/templates/harshibars-resume/sbcyynmtpnyd"

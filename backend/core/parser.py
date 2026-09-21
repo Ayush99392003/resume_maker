@@ -1,5 +1,4 @@
 import re
-from typing import Dict, List
 
 
 class SectionNode:
@@ -32,7 +31,7 @@ class SectionalParser:
             return latex[: first_match.start()].strip()
         return latex
 
-    def extract_sections(self, latex: str) -> Dict[str, str]:
+    def extract_sections(self, latex: str) -> dict[str, str]:
         """Extracts all sections and their content as a flat dictionary."""
         sections = {}
         for match in self.SECTION_PATTERN.finditer(latex):
@@ -40,7 +39,7 @@ class SectionalParser:
             sections[clean_title] = match.group("content").strip()
         return sections
 
-    def get_structured_document(self, latex: str) -> List[Dict]:
+    def get_structured_document(self, latex: str) -> list[dict]:
         """Returns a list of nodes (preamble, sections, epilogue)."""
         nodes = []
         last_pos = 0

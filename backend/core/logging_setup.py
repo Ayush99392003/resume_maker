@@ -6,7 +6,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 _CONFIGURED = False
 _CONSOLE = None
@@ -32,7 +32,7 @@ def get_console():
     return _CONSOLE
 
 
-def setup_logging(level: Optional[int] = None) -> logging.Logger:
+def setup_logging(level: int | None = None) -> logging.Logger:
     """
     Configure resume_maker logging with RichHandler (+ optional file sink).
 
@@ -138,7 +138,7 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(f"resume_maker.{name}")
 
 
-def debug_panel(title: str, data: Any, *, logger: Optional[logging.Logger] = None) -> None:
+def debug_panel(title: str, data: Any, *, logger: logging.Logger | None = None) -> None:
     """Pretty-print a debug panel to the Rich console + logger."""
     log = logger or get_logger("debug")
     try:
@@ -152,7 +152,7 @@ def debug_panel(title: str, data: Any, *, logger: Optional[logging.Logger] = Non
         log.debug("%s (see console panel)", title)
 
 
-def debug_exception(exc: BaseException, *, logger: Optional[logging.Logger] = None) -> None:
+def debug_exception(exc: BaseException, *, logger: logging.Logger | None = None) -> None:
     """Print a rich traceback for debugging."""
     log = logger or get_logger("debug")
     try:

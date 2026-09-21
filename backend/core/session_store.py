@@ -9,7 +9,7 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Literal
 
 # Path to the bundled resume.cls that every session workspace receives
 _RESUME_CLS_SRC: Path = (
@@ -26,7 +26,7 @@ def _utcnow() -> str:
 def _atomic_write_text(path: Path, content: str) -> None:
     """Write text atomically via temporary file, with fallback for FUSE."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path: Optional[Path] = None
+    temp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -56,7 +56,7 @@ _DISCONTINUED_MODELS = {
 }
 
 
-def _normalize_model(model_name: Optional[str]) -> str:
+def _normalize_model(model_name: str | None) -> str:
     if not model_name:
         return "openai/gpt-oss-120b"
     return _DISCONTINUED_MODELS.get(model_name, model_name)
@@ -67,55 +67,56 @@ class ChatMessageRecord(BaseModel):
     role: str
     content: str
     timestamp: str = Field(default_factory=_utcnow)
-    provider: Optional[str] = None
-    model: Optional[str] = None
-    meta: Dict[str, Any] = Field(default_factory=dict)
+    provider: str | None = None
+    model: str | None = None
+    meta: dict[str, Any] = Field(default_factory=dict)
 
 
 class TurnSnapshot(BaseModel):
-    """State captured before one orchestrator chat turn — for user-initiated undo."""
+    """State captured before one orchestrator turn — for user undo."""
 
     turn_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     latex_code: str = ""
-    zones: List[Dict[str, Any]] = Field(default_factory=list)
-    zone_order: List[int] = Field(default_factory=list)
+    zones: list[dict[str, Any]] = Field(default_factory=list)
+    zone_order: list[int] = Field(default_factory=list)
     header: str = ""
     footer: str = ""
     # Filled in *after* the turn completes, once we know the message IDs
-    message_ids: List[str] = Field(default_factory=list)
+    message_ids: list[str] = Field(default_factory=list)
     created_at: str = Field(default_factory=_utcnow)
 
 
 class ChatSession(BaseModel):
     session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    username: Optional[str] = None
+    username: str | None = None
     title: str = "New resume chat"
     template_name: str = "starter"
+    document_mode: Literal["resume", "research_paper"] = "resume"
     latex_code: str = ""
     # Numbered zone document (orchestrator source of truth)
     header: str = ""
     footer: str = ""
-    zones: List[Dict[str, Any]] = Field(default_factory=list)
-    zone_order: List[int] = Field(default_factory=list)
+    zones: list[dict[str, Any]] = Field(default_factory=list)
+    zone_order: list[int] = Field(default_factory=list)
     next_zone_no: int = 1
-    source_url: Optional[str] = None
-    project_dir: Optional[str] = None
-    # Persistent per-session workspace — contains resume.cls and compiled assets
-    workspace_dir: Optional[str] = None
+    source_url: str | None = None
+    project_dir: str | None = None
+    # Per-session workspace — contains resume.cls and compiled assets
+    workspace_dir: str | None = None
     setup_complete: bool = False
-    # Rollback snapshot — written before every orchestrator turn (single slot,
-    # used for automatic rollback on compile failure)
-    zones_snapshot: List[Dict[str, Any]] = Field(default_factory=list)
+    # Rollback snapshot — written before every orchestrator turn (single
+    # slot, used for automatic rollback on compile failure)
+    zones_snapshot: list[dict[str, Any]] = Field(default_factory=list)
     latex_code_snapshot: str = ""
     header_snapshot: str = ""
     footer_snapshot: str = ""
     # Per-turn undo history (ring buffer, newest last)
-    turn_history: List[TurnSnapshot] = Field(default_factory=list)
+    turn_history: list[TurnSnapshot] = Field(default_factory=list)
     created_at: str = Field(default_factory=_utcnow)
     updated_at: str = Field(default_factory=_utcnow)
     active_provider: str = "groq"
     active_model: str = "openai/gpt-oss-120b"
-    messages: List[ChatMessageRecord] = Field(default_factory=list)
+    messages: list[ChatMessageRecord] = Field(default_factory=list)
 
 
 # Maximum number of undo steps kept in memory per session
@@ -125,7 +126,7 @@ MAX_UNDO_DEPTH: int = 10
 class SessionStore:
     """File-backed session persistence under data/sessions/."""
 
-    def __init__(self, base_dir: Optional[Path] = None):
+    def __init__(self, base_dir: Path | None = None):
         if base_dir is None:
             base_dir = (
                 Path(__file__).resolve().parent.parent
@@ -167,26 +168,28 @@ class SessionStore:
     def create(
         self,
         *,
-        username: Optional[str] = None,
+        username: str | None = None,
         template_name: str = "starter",
+        document_mode: str = "resume",
         title: str = "New resume chat",
         latex_code: str = "",
         provider: str = "groq",
         model: str = "openai/gpt-oss-120b",
-        welcome: Optional[str] = None,
+        welcome: str | None = None,
         header: str = "",
         footer: str = "",
-        zones: Optional[List[Dict[str, Any]]] = None,
-        zone_order: Optional[List[int]] = None,
+        zones: list[dict[str, Any]] | None = None,
+        zone_order: list[int] | None = None,
         next_zone_no: int = 1,
-        source_url: Optional[str] = None,
-        project_dir: Optional[str] = None,
+        source_url: str | None = None,
+        project_dir: str | None = None,
         setup_complete: bool = False,
     ) -> ChatSession:
         session = ChatSession(
             username=username,
             title=title,
             template_name=template_name,
+            document_mode=document_mode,
             latex_code=latex_code,
             active_provider=provider,
             active_model=_normalize_model(model),
@@ -202,8 +205,12 @@ class SessionStore:
         # Seed a persistent workspace with resume.cls for this session
         ws = self._seed_workspace(session.session_id)
         # If the caller supplied a separate project_dir (Overleaf import),
-        # copy its files into the session workspace so everything lives together.
-        if project_dir and Path(project_dir).is_dir() and str(ws) != project_dir:
+        # copy its files into the session workspace.
+        if (
+            project_dir
+            and Path(project_dir).is_dir()
+            and str(ws) != project_dir
+        ):
             for item in Path(project_dir).iterdir():
                 dest = ws / item.name
                 if not dest.exists():
@@ -229,7 +236,7 @@ class SessionStore:
         )
         return session
 
-    def get(self, session_id: str) -> Optional[ChatSession]:
+    def get(self, session_id: str) -> ChatSession | None:
         path = self._path(session_id)
         if not path.exists():
             return None
@@ -250,8 +257,8 @@ class SessionStore:
         return False
 
     def list_sessions(
-        self, username: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+        self, username: str | None = None
+    ) -> list[dict[str, Any]]:
         items = []
         for path in sorted(
             self.base_dir.glob("*.json"),
@@ -274,6 +281,7 @@ class SessionStore:
                             data.get("active_model")
                         ),
                         "template_name": data.get("template_name"),
+                        "document_mode": data.get("document_mode", "resume"),
                         "setup_complete": data.get("setup_complete", False),
                         "zone_count": len(data.get("zones") or []),
                     }
@@ -283,7 +291,7 @@ class SessionStore:
         return items
 
     def verify_ownership(
-        self, session: ChatSession, username: Optional[str]
+        self, session: ChatSession, username: str | None
     ) -> bool:
         """Check whether session belongs to the user or is legacy."""
         if not username:
@@ -302,9 +310,9 @@ class SessionStore:
         *,
         role: str,
         content: str,
-        provider: Optional[str] = None,
-        model: Optional[str] = None,
-        meta: Optional[Dict[str, Any]] = None,
+        provider: str | None = None,
+        model: str | None = None,
+        meta: dict[str, Any] | None = None,
     ) -> ChatSession:
         session.messages.append(
             ChatMessageRecord(
@@ -330,7 +338,7 @@ class SessionStore:
 
 
 def take_snapshot(
-    session: ChatSession, store: "SessionStore"
+    session: ChatSession, store: SessionStore
 ) -> None:
     """Persist a rollback snapshot before an orchestrator edit turn.
 
@@ -353,7 +361,7 @@ def take_snapshot(
 
 
 def rollback_to_snapshot(
-    session: ChatSession, store: "SessionStore"
+    session: ChatSession, store: SessionStore
 ) -> bool:
     """Restore session zones from the pre-edit snapshot.
 
@@ -385,7 +393,7 @@ def rollback_to_snapshot(
 
 def push_turn_snapshot(
     session: ChatSession,
-    store: "SessionStore",
+    store: SessionStore,
 ) -> TurnSnapshot:
     """Capture the current document state before an orchestrator turn.
 
@@ -418,8 +426,8 @@ def push_turn_snapshot(
 def tag_turn_snapshot(
     session: ChatSession,
     snap: TurnSnapshot,
-    message_ids: List[str],
-    store: "SessionStore",
+    message_ids: list[str],
+    store: SessionStore,
 ) -> None:
     """Attach real message IDs to a snapshot after the turn completes.
 
@@ -435,8 +443,8 @@ def tag_turn_snapshot(
 
 def pop_turn_snapshot(
     session: ChatSession,
-    store: "SessionStore",
-) -> Optional[TurnSnapshot]:
+    store: SessionStore,
+) -> TurnSnapshot | None:
     """Remove and return the most recent undo snapshot.
 
     Restores ``session.latex_code``, ``session.zones``, etc. from that

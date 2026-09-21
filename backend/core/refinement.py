@@ -1,4 +1,4 @@
-from typing import List, Dict, Optional
+
 from pydantic import BaseModel
 
 
@@ -7,12 +7,12 @@ class DraftVariant(BaseModel):
     latex_code: str
     summary: str
     intent: str  # e.g., "Professional", "Creative", "Concise"
-    zone_id: Optional[str] = None
+    zone_id: str | None = None
 
 
 class RefinementProposal(BaseModel):
     original_latex: str
-    variants: List[DraftVariant]
+    variants: list[DraftVariant]
     session_id: str
 
 
@@ -20,13 +20,13 @@ class RefinementManager:
     """Manages multi-turn refinement sessions and versions."""
 
     def __init__(self):
-        self.active_sessions: Dict[str, RefinementProposal] = {}
+        self.active_sessions: dict[str, RefinementProposal] = {}
 
     def create_session(
         self,
         session_id: str,
         original_latex: str,
-        variants: List[DraftVariant]
+        variants: list[DraftVariant]
     ) -> RefinementProposal:
         proposal = RefinementProposal(
             original_latex=original_latex,
@@ -40,7 +40,7 @@ class RefinementManager:
         self,
         session_id: str,
         variant_id: str
-    ) -> Optional[DraftVariant]:
+    ) -> DraftVariant | None:
         session = self.active_sessions.get(session_id)
         if not session:
             return None

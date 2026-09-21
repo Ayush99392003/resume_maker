@@ -6,7 +6,7 @@ from pathlib import Path
 BACKEND = Path(__file__).resolve().parents[1] / "backend"
 sys.path.insert(0, str(BACKEND))
 
-from core.delta_patcher import apply_line_delta, patch_latex, apply_zone_delta
+from core.delta_patcher import apply_line_delta, apply_zone_delta, patch_latex
 
 # ---------------------------------------------------------------------------
 # Fixtures
